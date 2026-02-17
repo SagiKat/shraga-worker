@@ -1,0 +1,336 @@
+{
+  "name": "6db87fc1-a341-4b5d-843b-dfcc68054194",
+  "id": "/providers/Microsoft.ProcessSimple/environments/8660590d-33ac-ecd8-aef3-e4dd0d6071f4/flows/6db87fc1-a341-4b5d-843b-dfcc68054194",
+  "type": "Microsoft.ProcessSimple/environments/flows",
+  "properties": {
+    "apiId": "/providers/Microsoft.PowerApps/apis/shared_logicflows",
+    "displayName": "TaskCanceled",
+    "userType": "Owner",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$authentication": {
+          "defaultValue": {},
+          "type": "SecureObject"
+        },
+        "$connections": {
+          "defaultValue": {},
+          "type": "Object"
+        }
+      },
+      "triggers": {
+        "When_a_row_is_added,_modified_or_deleted": {
+          "type": "OpenApiConnectionWebhook",
+          "inputs": {
+            "parameters": {
+              "subscriptionRequest/message": 3,
+              "subscriptionRequest/entityname": "cr_shraga_task",
+              "subscriptionRequest/scope": 4,
+              "subscriptionRequest/filterexpression": "cr_status eq 9",
+              "subscriptionRequest/filteringattributes": "cr_status"
+            },
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
+              "connectionName": "shared_commondataserviceforapps",
+              "operationId": "SubscribeWebhookTrigger"
+            },
+            "authentication": "@parameters('$authentication')"
+          }
+        }
+      },
+      "actions": {
+        "Get_a_row_by_ID": {
+          "runAfter": {},
+          "type": "OpenApiConnection",
+          "inputs": {
+            "parameters": {
+              "entityName": "cr_shraga_tasks",
+              "recordId": "@triggerOutputs()?['body/cr_shraga_taskid']",
+              "$select": "cr_shraga_taskid,cr_prompt,cr_status,crb3b_useremail,crb3b_runningmessageid,crb3b_runningchatid,crb3b_onedriveurl"
+            },
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
+              "connectionName": "shared_commondataserviceforapps",
+              "operationId": "GetItem"
+            },
+            "authentication": "@parameters('$authentication')"
+          }
+        },
+        "Check_Status": {
+          "actions": {
+            "Check_Has_Card": {
+              "actions": {
+                "Compose_KilledCard": {
+                  "runAfter": {},
+                  "type": "Compose",
+                  "inputs": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.5",
+                    "body": [
+                      {
+                        "type": "Container",
+                        "style": "emphasis",
+                        "bleed": true,
+                        "items": [
+                          {
+                            "type": "ColumnSet",
+                            "columns": [
+                              {
+                                "type": "Column",
+                                "width": "auto",
+                                "items": [
+                                  {
+                                    "type": "Image",
+                                    "url": "https://cdn-icons-png.flaticon.com/512/4712/4712109.png",
+                                    "size": "Small",
+                                    "style": "Person",
+                                    "altText": "Shraga Agent"
+                                  }
+                                ],
+                                "verticalContentAlignment": "Center"
+                              },
+                              {
+                                "type": "Column",
+                                "width": "stretch",
+                                "items": [
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "Shraga Worker",
+                                    "weight": "Bolder",
+                                    "size": "Medium"
+                                  },
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "{taskTitle}",
+                                    "size": "Small",
+                                    "isSubtle": true,
+                                    "spacing": "None",
+                                    "wrap": true
+                                  }
+                                ],
+                                "verticalContentAlignment": "Center"
+                              },
+                              {
+                                "type": "Column",
+                                "width": "auto",
+                                "items": [
+                                  {
+                                    "type": "TextBlock",
+                                    "text": "KILLED",
+                                    "color": "Attention",
+                                    "size": "Small",
+                                    "weight": "Bolder"
+                                  }
+                                ],
+                                "verticalContentAlignment": "Center"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "type": "Container",
+                        "spacing": "Medium",
+                        "items": [
+                          {
+                            "type": "TextBlock",
+                            "text": "Task execution was terminated by user.",
+                            "wrap": true,
+                            "size": "Small",
+                            "isSubtle": true
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "Compose_KilledResolved": {
+                  "runAfter": {
+                    "Compose_KilledCard": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Compose",
+                  "inputs": "@replace(string(outputs('Compose_KilledCard')),'{taskTitle}',replace(replace(replace(replace(take(coalesce(outputs('Get_a_row_by_ID')?['body/cr_prompt'],''),255),'\\\\','\\\\\\\\'),'\"','\\\\\"'),decodeUriComponent('%0A'),'\\\\n'),decodeUriComponent('%0D'),'\\\\r'))"
+                },
+                "Compose_KilledWithOneDrive": {
+                  "runAfter": {
+                    "Compose_KilledResolved": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Compose",
+                  "inputs": "@json(concat(substring(string(outputs('Compose_KilledResolved')), 0, sub(length(string(outputs('Compose_KilledResolved'))), 2)), if(empty(outputs('Get_a_row_by_ID')?['body/crb3b_onedriveurl']), '', concat(',{\"type\":\"TextBlock\",\"text\":\"[See full results in session execution folder](', outputs('Get_a_row_by_ID')?['body/crb3b_onedriveurl'], ')\",\"size\":\"Small\",\"color\":\"Accent\",\"wrap\":true,\"spacing\":\"Medium\"}')), ']}'  ))"
+                },
+                "Update_Card_To_Killed": {
+                  "runAfter": {
+                    "Compose_KilledWithOneDrive": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "OpenApiConnection",
+                  "inputs": {
+                    "parameters": {
+                      "poster": "Flow bot",
+                      "location": "Group chat",
+                      "body/messageId": "@outputs('Get_a_row_by_ID')?['body/crb3b_runningmessageid']",
+                      "body/recipient": "@outputs('Get_a_row_by_ID')?['body/crb3b_runningchatid']",
+                      "body/messageBody": "@outputs('Compose_KilledWithOneDrive')"
+                    },
+                    "host": {
+                      "apiId": "/providers/Microsoft.PowerApps/apis/shared_teams",
+                      "connectionName": "shared_teams-1",
+                      "operationId": "UpdateCardInConversation"
+                    },
+                    "authentication": "@parameters('$authentication')"
+                  }
+                }
+              },
+              "runAfter": {},
+              "else": {
+                "actions": {
+                  "Terminate_No_Card": {
+                    "runAfter": {},
+                    "type": "Terminate",
+                    "inputs": {
+                      "runStatus": "Cancelled"
+                    }
+                  }
+                }
+              },
+              "expression": {
+                "not": {
+                  "equals": [
+                    "@coalesce(outputs('Get_a_row_by_ID')?['body/crb3b_runningmessageid'], '')",
+                    ""
+                  ]
+                }
+              },
+              "type": "If"
+            }
+          },
+          "runAfter": {
+            "Get_a_row_by_ID": [
+              "Succeeded"
+            ]
+          },
+          "else": {
+            "actions": {
+              "Terminate_Not_Canceled": {
+                "runAfter": {},
+                "type": "Terminate",
+                "inputs": {
+                  "runStatus": "Cancelled"
+                }
+              }
+            }
+          },
+          "expression": {
+            "equals": [
+              "@outputs('Get_a_row_by_ID')?['body/cr_status']",
+              9
+            ]
+          },
+          "type": "If"
+        }
+      }
+    },
+    "state": "Started",
+    "connectionReferences": {
+      "shared_commondataserviceforapps": {
+        "connectionName": "57aef69c3763444e8cfb3b0b5ba18fea",
+        "source": "Embedded",
+        "impersonation": {},
+        "id": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
+        "displayName": "Microsoft Dataverse",
+        "iconUri": "https://conn-afd-prod-endpoint-bmc9bqahasf3grgk.b01.azurefd.net/releases/v1.0.1797/1.0.1797.4592/commondataserviceforapps/icon.png",
+        "brandColor": "",
+        "tier": "Premium",
+        "apiName": "commondataserviceforapps",
+        "isProcessSimpleApiReferenceConversionAlreadyDone": false
+      },
+      "shared_teams-1": {
+        "connectionName": "70d2dee52a344508a14a40ee6013baf1",
+        "source": "Embedded",
+        "id": "/providers/Microsoft.PowerApps/apis/shared_teams",
+        "displayName": "Microsoft Teams",
+        "iconUri": "https://conn-afd-prod-endpoint-bmc9bqahasf3grgk.b01.azurefd.net/releases/v1.0.1787/1.0.1787.4513/teams/icon.png",
+        "brandColor": "",
+        "tier": "Standard",
+        "apiName": "teams",
+        "isProcessSimpleApiReferenceConversionAlreadyDone": false
+      }
+    },
+    "createdTime": "2026-02-15T08:18:22.119274Z",
+    "lastModifiedTime": "2026-02-15T08:18:22.4280174Z",
+    "flowSuspensionReason": "None",
+    "environment": {
+      "name": "8660590d-33ac-ecd8-aef3-e4dd0d6071f4",
+      "type": "Microsoft.ProcessSimple/environments",
+      "id": "/providers/Microsoft.ProcessSimple/environments/8660590d-33ac-ecd8-aef3-e4dd0d6071f4"
+    },
+    "definitionSummary": {
+      "triggers": [
+        {
+          "type": "OpenApiConnectionWebhook",
+          "swaggerOperationId": "SubscribeWebhookTrigger"
+        }
+      ],
+      "actions": [
+        {
+          "type": "OpenApiConnection",
+          "swaggerOperationId": "GetItem"
+        },
+        {
+          "type": "If"
+        },
+        {
+          "type": "If"
+        },
+        {
+          "type": "Terminate"
+        },
+        {
+          "type": "Compose"
+        },
+        {
+          "type": "Compose"
+        },
+        {
+          "type": "OpenApiConnection",
+          "swaggerOperationId": "UpdateCardInConversation"
+        },
+        {
+          "type": "Terminate"
+        }
+      ]
+    },
+    "creator": {
+      "tenantId": "72f988bf-86f1-41af-91ab-2d7cd011db47",
+      "objectId": "e7d3c4dd-130e-4b94-9594-4c74cdfb277b",
+      "userId": "e7d3c4dd-130e-4b94-9594-4c74cdfb277b",
+      "userType": "ActiveDirectory"
+    },
+    "installationStatus": "NotApplicable",
+    "provisioningMethod": "FromDefinition",
+    "flowFailureAlertSubscribed": true,
+    "referencedResources": [
+      {
+        "service": "teams",
+        "resource": {
+          "chatId": "@outputs('Get_a_row_by_ID')?['body/crb3b_runningchatid']"
+        },
+        "referencers": [
+          {
+            "referenceSourceType": "Actions",
+            "operationId": "/providers/Microsoft.PowerApps/apis/shared_teams/apiOperations/UpdateCardInConversation"
+          }
+        ]
+      }
+    ],
+    "isManaged": false,
+    "machineDescriptionData": {}
+  }
+}

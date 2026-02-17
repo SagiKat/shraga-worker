@@ -1,0 +1,39 @@
+{
+  "@odata.context": "https://org3e79cdb1.crm3.dynamics.com/api/data/v9.2/$metadata#EntityDefinitions('cr_shragamessage')/Attributes(LogicalName,AttributeType,DisplayName,SchemaName)",
+  "entity": "cr_shragamessage",
+  "collection": "cr_shragamessages",
+  "display_name": "Shraga Messages",
+  "description": "Individual message records for Shraga conversations.",
+  "custom_attributes": [
+    {
+      "LogicalName": "cr_content",
+      "SchemaName": "cr_content",
+      "AttributeType": "Memo",
+      "DisplayName": "Content"
+    },
+    {
+      "LogicalName": "cr_from",
+      "SchemaName": "cr_from",
+      "AttributeType": "String",
+      "DisplayName": "From"
+    },
+    {
+      "LogicalName": "cr_name",
+      "SchemaName": "cr_name",
+      "AttributeType": "String",
+      "DisplayName": "Name"
+    },
+    {
+      "LogicalName": "cr_to",
+      "SchemaName": "cr_to",
+      "AttributeType": "String",
+      "DisplayName": "To"
+    },
+    {
+      "LogicalName": "crb3b_taskid",
+      "SchemaName": "crb3b_TaskId",
+      "AttributeType": "String",
+      "DisplayName": "Task ID"
+    }
+  ]
+}

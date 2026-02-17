@@ -1,0 +1,135 @@
+{
+  "@odata.context": "https://org3e79cdb1.crm3.dynamics.com/api/data/v9.2/$metadata#EntityDefinitions('cr_shraga_task')/Attributes(LogicalName,AttributeType,DisplayName,SchemaName)",
+  "entity": "cr_shraga_task",
+  "collection": "cr_shraga_tasks",
+  "display_name": "Shraga Tasks",
+  "description": "Task records tracking AI agent task execution lifecycle.",
+  "custom_attributes": [
+    {
+      "LogicalName": "cr_name",
+      "SchemaName": "cr_name",
+      "AttributeType": "String",
+      "DisplayName": "Task ID"
+    },
+    {
+      "LogicalName": "cr_prompt",
+      "SchemaName": "cr_prompt",
+      "AttributeType": "Memo",
+      "DisplayName": "Prompt"
+    },
+    {
+      "LogicalName": "cr_result",
+      "SchemaName": "cr_result",
+      "AttributeType": "Memo",
+      "DisplayName": "Result"
+    },
+    {
+      "LogicalName": "cr_status",
+      "SchemaName": "cr_status",
+      "AttributeType": "Picklist",
+      "DisplayName": "Status"
+    },
+    {
+      "LogicalName": "cr_statusname",
+      "SchemaName": "cr_statusName",
+      "AttributeType": "Virtual",
+      "DisplayName": "(Status display name)"
+    },
+    {
+      "LogicalName": "cr_statusmessage",
+      "SchemaName": "cr_statusmessage",
+      "AttributeType": "String",
+      "DisplayName": "Status Message"
+    },
+    {
+      "LogicalName": "cr_transcript",
+      "SchemaName": "cr_transcript",
+      "AttributeType": "Memo",
+      "DisplayName": "Transcript"
+    },
+    {
+      "LogicalName": "cr_userid",
+      "SchemaName": "cr_userid",
+      "AttributeType": "String",
+      "DisplayName": "User ID"
+    },
+    {
+      "LogicalName": "crb3b_chatid",
+      "SchemaName": "crb3b_ChatID",
+      "AttributeType": "String",
+      "DisplayName": "Chat ID"
+    },
+    {
+      "LogicalName": "crb3b_controlchatid",
+      "SchemaName": "crb3b_ControlChatId",
+      "AttributeType": "String",
+      "DisplayName": "Control Chat ID"
+    },
+    {
+      "LogicalName": "crb3b_controlmessageid",
+      "SchemaName": "crb3b_ControlMessageId",
+      "AttributeType": "String",
+      "DisplayName": "Control Message ID"
+    },
+    {
+      "LogicalName": "crb3b_conversationid",
+      "SchemaName": "crb3b_ConversationID",
+      "AttributeType": "String",
+      "DisplayName": "Conversation ID"
+    },
+    {
+      "LogicalName": "crb3b_deeplink",
+      "SchemaName": "crb3b_deeplink",
+      "AttributeType": "String",
+      "DisplayName": "Deep Link"
+    },
+    {
+      "LogicalName": "crb3b_devbox",
+      "SchemaName": "crb3b_devbox",
+      "AttributeType": "String",
+      "DisplayName": "Dev Box"
+    },
+    {
+      "LogicalName": "crb3b_lastcardupdatetime",
+      "SchemaName": "crb3b_LastCardUpdateTime",
+      "AttributeType": "DateTime",
+      "DisplayName": "Last Card Update Time"
+    },
+    {
+      "LogicalName": "crb3b_messageid",
+      "SchemaName": "crb3b_MessageID",
+      "AttributeType": "String",
+      "DisplayName": "Message ID"
+    },
+    {
+      "LogicalName": "crb3b_runningchatid",
+      "SchemaName": "crb3b_RunningChatID",
+      "AttributeType": "String",
+      "DisplayName": "Running Chat ID"
+    },
+    {
+      "LogicalName": "crb3b_runningmessageid",
+      "SchemaName": "crb3b_RunningMessageID",
+      "AttributeType": "String",
+      "DisplayName": "Running Message ID"
+    },
+    {
+      "LogicalName": "crb3b_useremail",
+      "SchemaName": "crb3b_UserEmail",
+      "AttributeType": "String",
+      "DisplayName": "User Email"
+    },
+    {
+      "LogicalName": "crb3b_workingdir",
+      "SchemaName": "crb3b_workingdir",
+      "AttributeType": "String",
+      "DisplayName": "Working Directory"
+    },
+    {
+      "LogicalName": "crb3b_onedriveurl",
+      "SchemaName": "crb3b_onedriveurl",
+      "AttributeType": "String",
+      "DisplayName": "OneDrive URL"
+    }
+  ]
+}

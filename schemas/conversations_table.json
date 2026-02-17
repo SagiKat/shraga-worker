@@ -1,0 +1,82 @@
+{
+  "@odata.context": "https://org3e79cdb1.crm3.dynamics.com/api/data/v9.2/$metadata#EntityDefinitions('cr_shraga_conversation')/Attributes(LogicalName,AttributeType,DisplayName,SchemaName)",
+  "entity": "cr_shraga_conversation",
+  "collection": "cr_shraga_conversations",
+  "display_name": "Shraga Conversations",
+  "description": "Message bus between MCS bot and task managers. Each row is one message (inbound from user or outbound from manager).",
+  "custom_attributes": [
+    {
+      "LogicalName": "cr_claimed_by",
+      "SchemaName": "cr_claimed_by",
+      "AttributeType": "String",
+      "DisplayName": "Claimed By",
+      "description": "Identifier of the manager that claimed this message (e.g., 'personal:sagik@microsoft.com' or 'global')"
+    },
+    {
+      "LogicalName": "cr_direction",
+      "SchemaName": "cr_direction",
+      "AttributeType": "String",
+      "DisplayName": "Direction",
+      "description": "Message direction: 'Inbound' (user -> manager) or 'Outbound' (manager -> user)",
+      "values": ["Inbound", "Outbound"]
+    },
+    {
+      "LogicalName": "cr_followup_expected",
+      "SchemaName": "cr_followup_expected",
+      "AttributeType": "String",
+      "DisplayName": "Follow-up Expected",
+      "description": "Whether the bot should expect a follow-up message from the user ('true'/'false')"
+    },
+    {
+      "LogicalName": "cr_in_reply_to",
+      "SchemaName": "cr_in_reply_to",
+      "AttributeType": "String",
+      "DisplayName": "In Reply To",
+      "description": "GUID of the inbound message this outbound message responds to. Used by the relay flow to match responses."
+    },
+    {
+      "LogicalName": "cr_mcs_conversation_id",
+      "SchemaName": "cr_mcs_conversation_id",
+      "AttributeType": "String",
+      "DisplayName": "MCS Conversation ID",
+      "description": "MCS bot conversation ID (from System.Conversation.Id). Used to route responses back."
+    },
+    {
+      "LogicalName": "cr_message",
+      "SchemaName": "cr_message",
+      "AttributeType": "Memo",
+      "DisplayName": "Message",
+      "description": "Full message text (multiline, up to 100000 chars)"
+    },
+    {
+      "LogicalName": "cr_name",
+      "SchemaName": "cr_name",
+      "AttributeType": "String",
+      "DisplayName": "Name",
+      "description": "Display name / first line of message (auto-truncated)"
+    },
+    {
+      "LogicalName": "cr_status",
+      "SchemaName": "cr_status",
+      "AttributeType": "String",
+      "DisplayName": "Status",
+      "description": "Processing status",
+      "values": ["Unclaimed", "Claimed", "Processed", "Delivered"]
+    },
+    {
+      "LogicalName": "cr_useremail",
+      "SchemaName": "cr_useremail",
+      "AttributeType": "String",
+      "DisplayName": "User Email",
+      "description": "User email address (from System.User.Email)"
+    }
+  ],
+  "notes": [
+    "Inbound rows created by the MCS relay flow (direction='Inbound', status='Unclaimed')",
+    "Task managers poll for status='Unclaimed' rows, claim atomically via ETag optimistic concurrency",
+    "Personal manager claims its user's messages within 3s",
+    "Global manager claims unclaimed messages older than 15s",
+    "Manager writes outbound row (direction='Outbound') with in_reply_to pointing to inbound row",
+    "SendMessage flow polls for outbound row matching the inbound row ID, returns response to bot"
+  ]
+}

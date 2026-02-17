@@ -1,0 +1,481 @@
+{
+  "name": "f6144661-8f48-9528-f120-b1666abccea0",
+  "id": "/providers/Microsoft.ProcessSimple/environments/8660590d-33ac-ecd8-aef3-e4dd0d6071f4/flows/f6144661-8f48-9528-f120-b1666abccea0",
+  "type": "Microsoft.ProcessSimple/environments/flows",
+  "properties": {
+    "apiId": "/providers/Microsoft.PowerApps/apis/shared_logicflows",
+    "displayName": "SendMessage",
+    "userType": "Owner",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$authentication": {
+          "defaultValue": {},
+          "type": "SecureObject"
+        },
+        "$connections": {
+          "defaultValue": {},
+          "type": "Object"
+        }
+      },
+      "triggers": {
+        "manual": {
+          "metadata": {
+            "operationMetadataId": "b8f61c18-7224-4f8a-9c5f-72fbce5df764"
+          },
+          "type": "Request",
+          "kind": "Skills",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "description": "Please enter your input",
+                  "title": "userEmail",
+                  "type": "string",
+                  "x-ms-content-hint": "TEXT",
+                  "x-ms-dynamically-added": true
+                },
+                "text_1": {
+                  "description": "Please enter your input",
+                  "title": "conversationId",
+                  "type": "string",
+                  "x-ms-content-hint": "TEXT",
+                  "x-ms-dynamically-added": true
+                },
+                "text_2": {
+                  "description": "Please enter your input",
+                  "title": "messageText",
+                  "type": "string",
+                  "x-ms-content-hint": "TEXT",
+                  "x-ms-dynamically-added": true
+                },
+                "boolean": {
+                  "description": "Please select yes or no",
+                  "title": "isFollowup",
+                  "type": "boolean",
+                  "x-ms-content-hint": "BOOLEAN",
+                  "x-ms-dynamically-added": true
+                },
+                "text_3": {
+                  "description": "Inbound row ID for follow-up matching",
+                  "title": "inboundRowId",
+                  "type": "string",
+                  "x-ms-content-hint": "TEXT",
+                  "x-ms-dynamically-added": true
+                }
+              },
+              "required": [
+                "text",
+                "text_1",
+                "text_2"
+              ]
+            }
+          }
+        }
+      },
+      "actions": {
+        "Initialize_responseText": {
+          "runAfter": {
+            "Initialize_FilterExpression": [
+              "Succeeded"
+            ]
+          },
+          "type": "InitializeVariable",
+          "inputs": {
+            "variables": [
+              {
+                "name": "responseText",
+                "type": "string",
+                "value": ""
+              }
+            ]
+          }
+        },
+        "Wait_for_response": {
+          "actions": {
+            "List_responses": {
+              "type": "OpenApiConnection",
+              "inputs": {
+                "parameters": {
+                  "entityName": "cr_shraga_conversations",
+                  "$filter": "@variables('FilterExpression')",
+                  "$top": 1,
+                  "$orderby": "createdon desc"
+                },
+                "host": {
+                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
+                  "connectionName": "shared_commondataserviceforapps",
+                  "operationId": "ListRecords"
+                },
+                "authentication": "@parameters('$authentication')"
+              }
+            },
+            "Check_if_response_found": {
+              "actions": {
+                "Set_responseText": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "responseText",
+                    "value": "@first(outputs('List_responses')?['body/value'])?['cr_message']"
+                  }
+                },
+                "Set_variable": {
+                  "runAfter": {
+                    "Set_responseText": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "IsFollowupExpected",
+                    "value": "@first(outputs('List_responses')?['body/value'])?['cr_followup_expected']"
+                  }
+                },
+                "Mark_as_delivered": {
+                  "runAfter": {
+                    "Set_variable": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "OpenApiConnection",
+                  "inputs": {
+                    "parameters": {
+                      "entityName": "cr_shraga_conversations",
+                      "recordId": "@first(outputs('List_responses')?['body/value'])?['cr_shraga_conversationid']",
+                      "item/cr_status": "Delivered"
+                    },
+                    "host": {
+                      "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
+                      "connectionName": "shared_commondataserviceforapps",
+                      "operationId": "UpdateRecord"
+                    },
+                    "authentication": "@parameters('$authentication')"
+                  }
+                }
+              },
+              "runAfter": {
+                "List_responses": [
+                  "Succeeded"
+                ]
+              },
+              "else": {
+                "actions": {
+                  "Delay_3_seconds": {
+                    "type": "Wait",
+                    "inputs": {
+                      "interval": {
+                        "count": 3,
+                        "unit": "Second"
+                      }
+                    }
+                  }
+                }
+              },
+              "expression": {
+                "and": [
+                  {
+                    "greater": [
+                      "@length(outputs('List_responses')?['body/value'])",
+                      0
+                    ]
+                  }
+                ]
+              },
+              "type": "If"
+            }
+          },
+          "runAfter": {
+            "Initialize_variable": [
+              "Succeeded"
+            ]
+          },
+          "expression": "@not(equals(variables('responseText'), ''))",
+          "limit": {
+            "count": 30,
+            "timeout": "PT90S"
+          },
+          "type": "Until"
+        },
+        "Respond_to_the_agent": {
+          "runAfter": {
+            "Wait_for_response": [
+              "Succeeded",
+              "TimedOut"
+            ]
+          },
+          "metadata": {
+            "operationMetadataId": "81c94f73-dd52-465c-ad3b-a4686da63cc3"
+          },
+          "type": "Response",
+          "kind": "Skills",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "responsetext": {
+                  "title": "responseText",
+                  "type": "string",
+                  "x-ms-content-hint": "TEXT",
+                  "x-ms-dynamically-added": true
+                },
+                "isfollowupexpecterd": {
+                  "title": "IsFollowupExpecterd",
+                  "description": "",
+                  "type": "string",
+                  "x-ms-content-hint": "TEXT",
+                  "x-ms-dynamically-added": true
+                }
+              },
+              "additionalProperties": {}
+            },
+            "statusCode": 200,
+            "body": {
+              "responsetext": "@variables('responseText')",
+              "isfollowupexpecterd": "@{variables('IsFollowupExpected')}"
+            }
+          }
+        },
+        "Condition": {
+          "actions": {},
+          "runAfter": {},
+          "else": {
+            "actions": {
+              "Add_a_new_row": {
+                "type": "OpenApiConnection",
+                "inputs": {
+                  "parameters": {
+                    "entityName": "cr_shraga_conversations",
+                    "item/cr_direction": "Inbound",
+                    "item/cr_mcs_conversation_id": "@triggerBody()?['text_1']",
+                    "item/cr_message": "@triggerBody()?['text_2']",
+                    "item/cr_status": "Unclaimed",
+                    "item/cr_useremail": "@triggerBody()?['text']"
+                  },
+                  "host": {
+                    "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
+                    "connectionName": "shared_commondataserviceforapps",
+                    "operationId": "CreateRecord"
+                  },
+                  "authentication": "@parameters('$authentication')"
+                }
+              }
+            }
+          },
+          "expression": {
+            "and": [
+              {
+                "equals": [
+                  "@triggerBody()?['boolean']",
+                  "@true"
+                ]
+              }
+            ]
+          },
+          "type": "If"
+        },
+        "Initialize_variable": {
+          "runAfter": {
+            "Initialize_responseText": [
+              "Succeeded"
+            ]
+          },
+          "type": "InitializeVariable",
+          "inputs": {
+            "variables": [
+              {
+                "name": "IsFollowupExpected",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "Initialize_InboundRowId": {
+          "runAfter": {
+            "Condition": [
+              "Succeeded"
+            ]
+          },
+          "type": "InitializeVariable",
+          "inputs": {
+            "variables": [
+              {
+                "name": "InboundRowId",
+                "type": "string",
+                "value": "@if(not(empty(triggerBody()?['text_3'])), triggerBody()?['text_3'], coalesce(outputs('Add_a_new_row')?['body/cr_shraga_conversationid'], ''))"
+              }
+            ]
+          }
+        },
+        "Initialize_FilterExpression": {
+          "runAfter": {
+            "Initialize_InboundRowId": [
+              "Succeeded"
+            ]
+          },
+          "type": "InitializeVariable",
+          "inputs": {
+            "variables": [
+              {
+                "name": "FilterExpression",
+                "type": "string",
+                "value": "@if(equals(triggerBody()?['boolean'], true), concat('cr_mcs_conversation_id eq ''', triggerBody()?['text_1'], ''' and cr_direction eq ''Outbound'' and cr_status eq ''Unclaimed'''), concat('cr_in_reply_to eq ''', variables('InboundRowId'), ''' and cr_direction eq ''Outbound'' and cr_status eq ''Unclaimed'''))"
+              }
+            ]
+          }
+        }
+      },
+      "outputs": {},
+      "description": "When an agent calls the flow and send back a response."
+    },
+    "triggerSchema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "description": "Please enter your input",
+          "title": "userEmail",
+          "type": "string",
+          "x-ms-content-hint": "TEXT",
+          "x-ms-dynamically-added": true
+        },
+        "text_1": {
+          "description": "Please enter your input",
+          "title": "conversationId",
+          "type": "string",
+          "x-ms-content-hint": "TEXT",
+          "x-ms-dynamically-added": true
+        },
+        "text_2": {
+          "description": "Please enter your input",
+          "title": "messageText",
+          "type": "string",
+          "x-ms-content-hint": "TEXT",
+          "x-ms-dynamically-added": true
+        },
+        "boolean": {
+          "description": "Please select yes or no",
+          "title": "isFollowup",
+          "type": "boolean",
+          "x-ms-content-hint": "BOOLEAN",
+          "x-ms-dynamically-added": true
+        },
+        "text_3": {
+          "description": "Inbound row ID for follow-up matching",
+          "title": "inboundRowId",
+          "type": "string",
+          "x-ms-content-hint": "TEXT",
+          "x-ms-dynamically-added": true
+        }
+      },
+      "required": [
+        "text",
+        "text_1",
+        "text_2"
+      ]
+    },
+    "state": "Started",
+    "sharingType": "CommonDataService",
+    "connectionReferences": {
+      "shared_commondataserviceforapps": {
+        "connectionName": "57aef69c3763444e8cfb3b0b5ba18fea",
+        "connectionReferenceLogicalName": "copilots_header_4bc17.shared_commondataserviceforapps.57aef69c3763444e8cfb3b0b5ba18fea",
+        "source": "Embedded",
+        "impersonation": {},
+        "id": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
+        "displayName": "Microsoft Dataverse",
+        "iconUri": "https://conn-afd-prod-endpoint-bmc9bqahasf3grgk.b01.azurefd.net/releases/v1.0.1797/1.0.1797.4592/commondataserviceforapps/icon.png",
+        "brandColor": "",
+        "tier": "Premium",
+        "apiName": "commondataserviceforapps",
+        "isProcessSimpleApiReferenceConversionAlreadyDone": false
+      }
+    },
+    "installedConnectionReferences": {},
+    "createdTime": "2026-02-15T17:06:49.6034692Z",
+    "lastModifiedTime": "2026-02-15T21:51:25Z",
+    "flowSuspensionReason": "None",
+    "environment": {
+      "name": "8660590d-33ac-ecd8-aef3-e4dd0d6071f4",
+      "type": "Microsoft.ProcessSimple/environments",
+      "id": "/providers/Microsoft.ProcessSimple/environments/8660590d-33ac-ecd8-aef3-e4dd0d6071f4"
+    },
+    "definitionSummary": {
+      "triggers": [
+        {
+          "type": "Request",
+          "kind": "Skills",
+          "metadata": {
+            "operationMetadataId": "b8f61c18-7224-4f8a-9c5f-72fbce5df764"
+          }
+        }
+      ],
+      "actions": [
+        {
+          "type": "InitializeVariable"
+        },
+        {
+          "type": "Until"
+        },
+        {
+          "type": "Response",
+          "kind": "Skills",
+          "metadata": {
+            "operationMetadataId": "81c94f73-dd52-465c-ad3b-a4686da63cc3"
+          }
+        },
+        {
+          "type": "If"
+        },
+        {
+          "type": "InitializeVariable"
+        },
+        {
+          "type": "InitializeVariable"
+        },
+        {
+          "type": "InitializeVariable"
+        },
+        {
+          "type": "OpenApiConnection",
+          "swaggerOperationId": "ListRecords"
+        },
+        {
+          "type": "If"
+        },
+        {
+          "type": "OpenApiConnection",
+          "swaggerOperationId": "CreateRecord"
+        },
+        {
+          "type": "SetVariable"
+        },
+        {
+          "type": "SetVariable"
+        },
+        {
+          "type": "OpenApiConnection",
+          "swaggerOperationId": "UpdateRecord"
+        },
+        {
+          "type": "Wait"
+        }
+      ],
+      "description": "When an agent calls the flow and send back a response."
+    },
+    "creator": {
+      "tenantId": "72f988bf-86f1-41af-91ab-2d7cd011db47",
+      "objectId": "e7d3c4dd-130e-4b94-9594-4c74cdfb277b",
+      "userId": "e7d3c4dd-130e-4b94-9594-4c74cdfb277b",
+      "userType": "ActiveDirectory"
+    },
+    "flowTriggerUri": "https://8660590d-33ac-ecd8-aef3-e4dd0d6071f4.03.common.canada.azure-apihub.net:443/apim/logicflows/F61446618F489528F120B1666ABCCEA0-49561AFE89A3EB1E/triggers/manual/run?api-version=2016-06-01",
+    "installationStatus": "Installed",
+    "provisioningMethod": "FromDefinition",
+    "flowFailureAlertSubscribed": true,
+    "workflowEntityId": "68c91f74-85d8-0fec-b574-8ae9f315453b",
+    "referencedResources": [],
+    "isManaged": false,
+    "machineDescriptionData": {}
+  }
+}

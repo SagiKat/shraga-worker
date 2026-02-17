@@ -1,0 +1,1501 @@
+"""
+Integrated Task Worker - Combines Dataverse polling with autonomous agent execution
+
+Polls Dataverse for tasks → Executes using Worker/Verifier loop → Updates Dataverse
+"""
+import platform
+import requests
+import socket
+import subprocess
+import time
+import json
+import sys
+import shutil
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+from azure.identity import DefaultAzureCredential
+from azure.core.credentials import AccessToken
+
+# Import the autonomous agent system (from same directory as this file)
+sys.path.insert(0, str(Path(__file__).parent))
+from autonomous_agent import AgentCLI, extract_phase_stats, merge_phase_stats
+
+import os
+from onedrive_utils import find_onedrive_root, local_path_to_web_url, OneDriveRootNotFoundError
+
+DATAVERSE_URL = os.environ.get("DATAVERSE_URL", "https://org3e79cdb1.crm3.dynamics.com")
+TABLE = os.environ.get("TABLE_NAME", "cr_shraga_tasks")  # MCS table with solution prefix
+STATE_FILE = ".integrated_worker_state.json"
+
+WEBHOOK_USER = os.environ.get("WEBHOOK_USER", "sagik@microsoft.com")
+REQUEST_TIMEOUT = 30  # seconds for HTTP requests to Dataverse
+UPDATE_BRANCH = os.environ.get("UPDATE_BRANCH", "origin/users/sagik/shraga-worker")
+
+MACHINE_NAME = platform.node()  # This dev box's hostname
+
+# Status codes
+STATUS_PENDING = 1
+STATUS_QUEUED = 3
+STATUS_RUNNING = 5
+STATUS_WAITING_FOR_INPUT = 6
+STATUS_COMPLETED = 7
+STATUS_FAILED = 8
+
+def format_session_numbers(stats: dict) -> str:
+    """Format accumulated session stats into a one-line summary string.
+
+    Args:
+        stats: Accumulated stats dict from merge_phase_stats (keys:
+               total_cost_usd, total_duration_ms, total_turns, tokens,
+               model_usage).
+
+    Returns:
+        A formatted string like:
+        ``--- Session Numbers ---
+        Duration: 2m 35s | Cost: $0.12 | Tokens: 12,345 in / 6,789 out | Turns: 8 | Sub-agents: 1``
+    """
+    if not stats:
+        return ""
+
+    # Duration
+    total_ms = stats.get("total_duration_ms", 0)
+    total_sec = total_ms / 1000
+    minutes = int(total_sec // 60)
+    seconds = int(total_sec % 60)
+    if minutes > 0:
+        duration_str = f"{minutes}m {seconds:02d}s"
+    else:
+        duration_str = f"{seconds}s"
+
+    # Cost
+    cost = stats.get("total_cost_usd", 0.0)
+    cost_str = f"${cost:.2f}"
+
+    # Tokens
+    tokens = stats.get("tokens", {})
+    tok_in = tokens.get("input", 0)
+    tok_out = tokens.get("output", 0)
+    tokens_str = f"{tok_in:,} in / {tok_out:,} out"
+
+    # Turns
+    turns = stats.get("total_turns", 0)
+
+    # Sub-agents (number of distinct models minus the main one)
+    model_usage = stats.get("model_usage", {})
+    sub_agents = max(0, len(model_usage) - 1)
+
+    return (
+        f"\n\n--- Session Numbers ---\n"
+        f"Duration: {duration_str} | Cost: {cost_str} | "
+        f"Tokens: {tokens_str} | Turns: {turns} | Sub-agents: {sub_agents}"
+    )
+
+
+class IntegratedTaskWorker:
+    """Worker that uses autonomous agent system for task execution"""
+
+    def __init__(self):
+        self.current_user_id = None
+        self.current_task_id = None  # Set during task processing for message correlation
+        self.work_base_dir = Path(os.environ.get("WORK_BASE_DIR", str(Path(__file__).parent)))
+
+        # Azure authentication
+        self.credential = DefaultAzureCredential()
+        self._token_cache = None
+        self._token_expires = None
+
+        # Version and update tracking
+        self.repo_path = Path(__file__).parent
+        self.current_version = self.load_version()
+        self.last_update_check = None
+        self.update_check_interval = timedelta(minutes=10)
+
+        self.load_state()
+
+    def create_session_folder(self, task_name: str, task_id: str) -> Path:
+        """Create an isolated OneDrive session folder for a task.
+
+        Folder structure: {OneDrive root}/Shraga Sessions/{task_name}_{task_id_short}/
+        Falls back to local work_base_dir if OneDrive is not available.
+        """
+        # Sanitize task name for filesystem
+        safe_name = "".join(c if c.isalnum() or c in ('-', '_', ' ') else '_' for c in task_name)
+        safe_name = safe_name.strip()[:50]  # Limit length
+        task_id_short = task_id[:8] if task_id else datetime.now().strftime("%Y%m%d")
+        folder_name = f"{safe_name}_{task_id_short}"
+
+        try:
+            onedrive_root = find_onedrive_root()
+            sessions_root = Path(onedrive_root) / "Shraga Sessions"
+            sessions_root.mkdir(exist_ok=True)
+            session_folder = sessions_root / folder_name
+            session_folder.mkdir(exist_ok=True, parents=True)
+            print(f"[ONEDRIVE] Session folder: {session_folder}")
+            return session_folder
+        except OneDriveRootNotFoundError as e:
+            print(f"[WARN] OneDrive not found: {e}")
+            print(f"[WARN] Falling back to local work directory")
+            fallback = self.work_base_dir / f"agent_task_{folder_name}"
+            fallback.mkdir(exist_ok=True, parents=True)
+            return fallback
+
+    def load_state(self):
+        """Load worker state"""
+        state_path = Path(STATE_FILE)
+        if state_path.exists():
+            with open(state_path, encoding="utf-8") as f:
+                data = json.load(f)
+                self.current_user_id = data.get("current_user_id")
+
+    def save_state(self):
+        """Save worker state"""
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "current_user_id": self.current_user_id
+            }, f, indent=2)
+
+    def get_token(self):
+        """Get OAuth token using DefaultAzureCredential (secure, cached)"""
+        try:
+            # Return cached token if still valid
+            if self._token_cache and self._token_expires:
+                if datetime.now(timezone.utc) < self._token_expires:
+                    return self._token_cache
+
+            # Get new token
+            token: AccessToken = self.credential.get_token(f"{DATAVERSE_URL}/.default")
+
+            # Cache token (expire 5 minutes early to be safe)
+            self._token_cache = token.token
+            self._token_expires = datetime.fromtimestamp(token.expires_on, tz=timezone.utc) - timedelta(minutes=5)
+
+            return self._token_cache
+        except Exception as e:
+            print(f"[ERROR] Getting token: {e}")
+            print("[HINT] Make sure you've run: az login")
+            return None
+
+    def _get_headers(self, content_type=None, etag=None):
+        """Build OData headers with auth token. Returns None if token unavailable."""
+        token = self.get_token()
+        if not token:
+            return None
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "OData-MaxVersion": "4.0",
+            "OData-Version": "4.0"
+        }
+        if content_type:
+            headers["Content-Type"] = content_type
+        if etag:
+            headers["If-Match"] = etag
+        return headers
+
+    def get_current_user(self):
+        """Get current user ID"""
+        headers = self._get_headers()
+        if not headers:
+            return None
+
+        try:
+            url = f"{DATAVERSE_URL}/api/data/v9.2/WhoAmI"
+            response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            user_data = response.json()
+            user_id = user_data.get("UserId")
+            self.current_user_id = user_id
+            self.save_state()
+            return user_id
+        except requests.exceptions.Timeout:
+            print(f"[ERROR] WhoAmI request timed out")
+            return None
+        except Exception as e:
+            print(f"[ERROR] Getting current user: {e}")
+            return None
+
+    def load_version(self):
+        """Load current version from VERSION file"""
+        version_file = self.repo_path / "VERSION"
+        try:
+            if version_file.exists():
+                return version_file.read_text().strip()
+            return "unknown"
+        except Exception as e:
+            print(f"[WARN] Could not read VERSION file: {e}")
+            return "unknown"
+
+    def check_for_updates(self):
+        """Check if new version available (when idle)"""
+        try:
+            # Fetch latest from remote
+            result = subprocess.run(
+                ["git", "fetch"],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode != 0:
+                print(f"[WARN] Git fetch failed: {result.stderr}")
+                return False
+
+            # Read remote VERSION file
+            result = subprocess.run(
+                ["git", "show", f"{UPDATE_BRANCH}:VERSION"],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode != 0:
+                print(f"[WARN] Could not read remote VERSION: {result.stderr}")
+                return False
+
+            remote_version = result.stdout.strip()
+
+            if remote_version != self.current_version:
+                print(f"[UPDATE] New version available: {remote_version} (current: {self.current_version})")
+                return True
+
+            return False
+        except subprocess.TimeoutExpired:
+            print(f"[WARN] Update check timed out")
+            return False
+        except Exception as e:
+            print(f"[WARN] Update check failed: {e}")
+            return False
+
+    def apply_update(self):
+        """Pull latest code and restart worker"""
+        try:
+            print("[UPDATE] Applying update...")
+
+            # Pull latest code
+            result = subprocess.run(
+                ["git", "pull"],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+
+            if result.returncode != 0:
+                print(f"[ERROR] Git pull failed: {result.stderr}")
+                return False
+
+            print(f"[UPDATE] Code updated successfully")
+            print("[UPDATE] Restarting worker...")
+
+            # Exit - Task Scheduler will restart us
+            sys.exit(0)
+
+        except subprocess.TimeoutExpired:
+            print(f"[ERROR] Update timed out")
+            return False
+        except Exception as e:
+            print(f"[ERROR] Update failed: {e}")
+            return False
+
+    def commit_task_results(self, task_id, work_dir):
+        """Commit task results to Git for audit trail"""
+        try:
+            print(f"[GIT] Committing task {task_id} results...")
+
+            # Add all changes
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=work_dir,
+                check=True,
+                timeout=30
+            )
+
+            # Create commit message
+            commit_msg = f"Task {task_id}: Completed by autonomous agent\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>"
+
+            # Commit
+            result = subprocess.run(
+                ["git", "commit", "-m", commit_msg],
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode != 0:
+                # Check if no changes to commit
+                if "nothing to commit" in result.stdout:
+                    print(f"[GIT] No changes to commit for task {task_id}")
+                    return None
+                print(f"[WARN] Git commit failed: {result.stderr}")
+                return None
+
+            # Get commit SHA
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10
+            )
+
+            commit_sha = result.stdout.strip()
+            print(f"[GIT] Committed as {commit_sha[:8]}")
+
+            return commit_sha
+
+        except Exception as e:
+            print(f"[ERROR] Git commit failed: {e}")
+            return None
+
+    def poll_pending_tasks(self):
+        """Poll for pending tasks assigned to this dev box or unassigned."""
+        if not self.current_user_id:
+            self.get_current_user()
+
+        headers = self._get_headers()
+        if not headers:
+            return []
+
+        url = f"{DATAVERSE_URL}/api/data/v9.2/{TABLE}"
+
+        # Filter for pending tasks assigned to this dev box or unassigned
+        # Support GUID, email in cr_userid, or email in crb3b_useremail
+        filter_parts = [
+            f"cr_status eq {STATUS_PENDING}",
+            f"(cr_userid eq '{self.current_user_id}' or cr_userid eq '{WEBHOOK_USER}' or crb3b_useremail eq '{WEBHOOK_USER}')",
+            f"(crb3b_devbox eq '{MACHINE_NAME}' or crb3b_devbox eq null)"
+        ]
+
+        params = {
+            "$filter": " and ".join(filter_parts),
+            "$orderby": "createdon asc",
+            "$top": 1  # Process one task at a time
+        }
+
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("value", [])
+        except requests.exceptions.Timeout:
+            print(f"[ERROR] Polling tasks timed out")
+            return []
+        except Exception as e:
+            print(f"[ERROR] Polling tasks: {e}")
+            return []
+
+    def is_devbox_busy(self):
+        """Check if this dev box already has a running task.
+
+        Queries Dataverse for tasks on this machine with status Running.
+        Returns True if busy, False if free.
+        """
+        headers = self._get_headers()
+        if not headers:
+            return False  # Fail open -- allow pickup if we can't check
+
+        url = f"{DATAVERSE_URL}/api/data/v9.2/{TABLE}"
+        params = {
+            "$filter": f"crb3b_devbox eq '{MACHINE_NAME}' and cr_status eq {STATUS_RUNNING}",
+            "$top": 1,
+            "$select": "cr_shraga_taskid"
+        }
+
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            data = response.json()
+            tasks = data.get("value", [])
+            if tasks:
+                print(f"[BUSY] Dev box {MACHINE_NAME} already has a running task: {tasks[0].get('cr_shraga_taskid', '?')}")
+                return True
+            return False
+        except requests.exceptions.Timeout:
+            print(f"[WARN] is_devbox_busy check timed out")
+            return False
+        except Exception as e:
+            print(f"[WARN] is_devbox_busy check failed: {e}")
+            return False
+
+    def claim_task(self, task: dict) -> bool:
+        """Atomically claim a task using ETag optimistic concurrency.
+
+        Sets the task status from Pending to Running using If-Match header.
+        Returns True if claimed, False if another worker got it first (HTTP 412).
+        Mirrors the pattern in task_manager.py claim_message().
+        """
+        task_id = task.get("cr_shraga_taskid")
+        etag = task.get("@odata.etag")
+        if not task_id or not etag:
+            print(f"[WARN] Cannot claim task -- missing id or etag")
+            return False
+
+        headers = self._get_headers(
+            content_type="application/json",
+            etag=etag,
+        )
+        if not headers:
+            return False
+
+        try:
+            url = f"{DATAVERSE_URL}/api/data/v9.2/{TABLE}({task_id})"
+            body = {
+                "cr_status": STATUS_RUNNING,
+                "cr_statusmessage": f"Claimed by {MACHINE_NAME}",
+            }
+            response = requests.patch(url, headers=headers, json=body, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 412:
+                # Someone else claimed it first (optimistic concurrency conflict)
+                print(f"[INFO] Task {task_id} already claimed by another worker")
+                return False
+            response.raise_for_status()
+            print(f"[CLAIM] Successfully claimed task {task_id}")
+            return True
+        except requests.exceptions.Timeout:
+            print(f"[WARN] claim_task timed out for {task_id}")
+            return False
+        except Exception as e:
+            print(f"[ERROR] claim_task: {e}")
+            return False
+
+    def queue_task(self, task: dict) -> bool:
+        """Set a task to Queued status when this dev box is busy.
+
+        Returns True on success, False on failure.
+        """
+        task_id = task.get("cr_shraga_taskid")
+        if not task_id:
+            return False
+
+        headers = self._get_headers(content_type="application/json")
+        if not headers:
+            return False
+
+        try:
+            url = f"{DATAVERSE_URL}/api/data/v9.2/{TABLE}({task_id})"
+            body = {
+                "cr_status": STATUS_QUEUED,
+                "cr_statusmessage": f"Queued on {MACHINE_NAME} -- waiting for current task to finish",
+            }
+            response = requests.patch(url, headers=headers, json=body, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            print(f"[QUEUED] Task {task_id} queued on {MACHINE_NAME}")
+            return True
+        except requests.exceptions.Timeout:
+            print(f"[WARN] queue_task timed out for {task_id}")
+            return False
+        except Exception as e:
+            print(f"[ERROR] queue_task: {e}")
+            return False
+
+    def promote_queued_tasks(self):
+        """After completing a task, promote any Queued tasks on this dev box back to Pending.
+
+        Promotes the oldest queued task so the next poll cycle picks it up.
+        """
+        headers = self._get_headers()
+        if not headers:
+            return
+
+        url = f"{DATAVERSE_URL}/api/data/v9.2/{TABLE}"
+        params = {
+            "$filter": f"crb3b_devbox eq '{MACHINE_NAME}' and cr_status eq {STATUS_QUEUED}",
+            "$orderby": "createdon asc",
+            "$top": 1,
+            "$select": "cr_shraga_taskid"
+        }
+
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            data = response.json()
+            tasks = data.get("value", [])
+
+            if tasks:
+                queued_task_id = tasks[0].get("cr_shraga_taskid")
+                if queued_task_id:
+                    self.update_task(
+                        queued_task_id,
+                        status=STATUS_PENDING,
+                        status_message="Promoted from Queued -- dev box is now free"
+                    )
+                    print(f"[PROMOTE] Promoted queued task {queued_task_id} to Pending")
+        except requests.exceptions.Timeout:
+            print(f"[WARN] promote_queued_tasks timed out")
+        except Exception as e:
+            print(f"[WARN] promote_queued_tasks failed: {e}")
+
+    def update_task(self, task_id: str, status: int = None,
+                    status_message: str = None, result: str = None,
+                    transcript: str = None, workingdir: str = None,
+                    onedriveurl: str = None, session_summary: str = None):
+        """Update task in Dataverse"""
+        headers = self._get_headers(content_type="application/json")
+        if not headers:
+            return False
+
+        url = f"{DATAVERSE_URL}/api/data/v9.2/{TABLE}({task_id})"
+
+        data = {}
+        if status is not None:
+            data["cr_status"] = status
+        if status_message is not None:
+            data["cr_statusmessage"] = status_message
+        if result is not None:
+            data["cr_result"] = result
+        if transcript is not None:
+            data["cr_transcript"] = transcript
+        if workingdir is not None:
+            data["crb3b_workingdir"] = workingdir
+        if onedriveurl is not None:
+            data["crb3b_onedriveurl"] = onedriveurl
+        if session_summary is not None:
+            data["crb3b_sessionsummary"] = session_summary
+
+        try:
+            response = requests.patch(url, headers=headers, json=data, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            return True
+        except requests.exceptions.Timeout:
+            print(f"[ERROR] Task update timed out")
+            return False
+        except Exception as e:
+            # If the crb3b_sessionsummary column doesn't exist yet, retry without it
+            if session_summary is not None and "crb3b_sessionsummary" in data:
+                error_str = str(e).lower()
+                if "property" in error_str or "column" in error_str or "attribute" in error_str or "crb3b_sessionsummary" in error_str:
+                    print(f"[WARN] crb3b_sessionsummary column may not exist yet, retrying without it")
+                    del data["crb3b_sessionsummary"]
+                    try:
+                        response = requests.patch(url, headers=headers, json=data, timeout=REQUEST_TIMEOUT)
+                        response.raise_for_status()
+                        return True
+                    except Exception as retry_e:
+                        print(f"[ERROR] Retry without session_summary also failed: {retry_e}")
+                        return False
+            print(f"[ERROR] Updating task: {e}")
+            return False
+
+    def parse_prompt_with_llm(self, raw_prompt: str) -> dict:
+        """
+        Use LLM to parse unstructured prompt text into structured fields.
+        This handles any format MCS uses without brittle string matching.
+
+        Args:
+            raw_prompt: Raw unstructured text from Dataverse
+
+        Returns:
+            dict with keys: task_description, contact_rules, success_criteria
+        """
+        print("[LLM PARSER] Parsing unstructured prompt...")
+
+        parsing_prompt = f"""You are a prompt parser. Extract the following fields from the raw task prompt below:
+
+1. **task_description**: The main task to accomplish (what needs to be done)
+2. **contact_rules**: When/how to contact the user (default: "Only when blocked")
+3. **success_criteria**: How to know when the task is complete
+
+Return ONLY a JSON object with these three fields. No markdown, no explanation, just the JSON.
+
+Example output format:
+{{
+  "task_description": "Create a REST API for user authentication",
+  "contact_rules": "Only when blocked",
+  "success_criteria": "API endpoints work and tests pass"
+}}
+
+Raw prompt to parse:
+{raw_prompt}
+
+JSON output:"""
+
+        try:
+            # Call Claude Code CLI for parsing
+            cmd = [
+                "claude",
+                "-p",  # Print mode
+                "--output-format", "json",
+                "--dangerously-skip-permissions",
+            ]
+
+            # Strip CLAUDECODE env var to avoid "nested session" error
+            env = {k: v for k, v in os.environ.items() if k != 'CLAUDECODE'}
+
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                env=env
+            )
+
+            # Send prompt and get response
+            stdout, stderr = process.communicate(input=parsing_prompt, timeout=30)
+
+            if process.returncode != 0:
+                raise Exception(f"Claude Code failed: {stderr}")
+
+            # Parse the JSON output
+            response = json.loads(stdout)
+            result_text = response.get('result', '').strip()
+
+            # Try to extract JSON from the result
+            # Handle cases where Claude wraps JSON in markdown or adds explanation
+            start_idx = result_text.find('{')
+            end_idx = result_text.rfind('}')
+
+            if start_idx == -1 or end_idx == -1:
+                raise Exception(f"No JSON found in response: {result_text}")
+
+            json_str = result_text[start_idx:end_idx+1]
+            parsed = json.loads(json_str)
+
+            # Validate required fields
+            required_fields = ['task_description', 'contact_rules', 'success_criteria']
+            for field in required_fields:
+                if field not in parsed:
+                    parsed[field] = ""  # Provide empty default
+
+            print(f"[LLM PARSER] ✓ Successfully parsed prompt")
+            print(f"  - Task: {parsed['task_description'][:60]}...")
+            print(f"  - Contact: {parsed['contact_rules'][:40]}")
+            print(f"  - Criteria: {parsed['success_criteria'][:60]}...")
+
+            return parsed
+
+        except subprocess.TimeoutExpired:
+            print("[LLM PARSER] ✗ Timeout - falling back to default")
+            return {
+                'task_description': raw_prompt,
+                'contact_rules': 'Only when blocked',
+                'success_criteria': 'Review and confirm task is complete'
+            }
+        except Exception as e:
+            print(f"[LLM PARSER] ✗ Error: {e}")
+            print(f"[LLM PARSER] Falling back to using raw prompt")
+            return {
+                'task_description': raw_prompt,
+                'contact_rules': 'Only when blocked',
+                'success_criteria': 'Review and confirm task is complete'
+            }
+
+    def append_to_transcript(self, current_transcript: str, from_who: str, message: str):
+        """Append message to JSONL transcript"""
+        lines = current_transcript.split("\n") if current_transcript else []
+
+        new_entry = json.dumps({
+            "from": from_who,
+            "time": datetime.now(timezone.utc).isoformat(),
+            "message": message
+        })
+
+        lines.append(new_entry)
+        return "\n".join(line for line in lines if line.strip())
+
+    def send_to_webhook(self, message: str):
+        """Send notification message to Dataverse table"""
+        headers = self._get_headers(content_type="application/json")
+        if not headers:
+            return False
+
+        url = f"{DATAVERSE_URL}/api/data/v9.2/cr_shragamessages"
+
+        # Create message record
+        # cr_name: Use first line, max 450 chars (Dataverse primary name column limit ~450-500)
+        # cr_content: Full message (no limit)
+        # crb3b_taskid: Related task ID for Flow 3A correlation
+        first_line = message.split('\n')[0] if '\n' in message else message
+        title = first_line[:450] if len(first_line) > 450 else first_line
+
+        data = {
+            "cr_name": title,
+            "cr_from": "Integrated Task Worker",
+            "cr_to": WEBHOOK_USER,
+            "cr_content": message  # Full message, no character limit
+        }
+        # Include task ID if available (for Flow 3A progress card updates)
+        if self.current_task_id:
+            data["crb3b_taskid"] = self.current_task_id
+
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=10)
+            response.raise_for_status()
+            print(f"[MESSAGE] Saved: {message[:80]}...")
+            return True
+        except requests.exceptions.HTTPError as e:
+            # Capture detailed error information
+            error_detail = e.response.text if hasattr(e.response, 'text') else str(e)
+            print(f"[ERROR] Saving message (HTTP {e.response.status_code}): {error_detail[:500]}")
+            print(f"[ERROR] Message size: {len(message)} chars, Title: {title[:100]}")
+
+            # If message is too large, try truncating content
+            if e.response.status_code == 400 and len(message) > 10000:
+                print(f"[RETRY] Message too large ({len(message)} chars), truncating to 10000 chars")
+                truncated_message = message[:10000] + "\n\n... (truncated - full result saved in task record)"
+                truncated_data = {
+                    "cr_name": title,
+                    "cr_from": "Integrated Task Worker",
+                    "cr_to": WEBHOOK_USER,
+                    "cr_content": truncated_message
+                }
+                if self.current_task_id:
+                    truncated_data["crb3b_taskid"] = self.current_task_id
+                try:
+                    response = requests.post(url, headers=headers, json=truncated_data, timeout=10)
+                    response.raise_for_status()
+                    print(f"[MESSAGE] Saved (truncated): {message[:80]}...")
+                    return True
+                except requests.exceptions.HTTPError as e2:
+                    error_detail2 = e2.response.text if hasattr(e2.response, 'text') else str(e2)
+                    print(f"[ERROR] Even truncated message failed (HTTP {e2.response.status_code}): {error_detail2[:500]}")
+            return False
+        except Exception as e:
+            # Handle non-HTTP errors (network, timeout, etc.)
+            print(f"[ERROR] Non-HTTP error saving message: {type(e).__name__}: {e}")
+            print(f"[ERROR] Message size: {len(message)} chars")
+            return False
+
+    def fetch_task_activities(self, task_id: str, max_messages: int = 50) -> list:
+        """Fetch activity messages from cr_shragamessages for a given task.
+
+        Returns a list of short activity strings, most recent last.
+        """
+        headers = self._get_headers()
+        if not headers:
+            return []
+
+        url = f"{DATAVERSE_URL}/api/data/v9.2/cr_shragamessages"
+        params = {
+            "$filter": f"crb3b_taskid eq '{task_id}'",
+            "$orderby": "createdon asc",
+            "$top": max_messages,
+            "$select": "cr_name,createdon",
+        }
+
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            messages = response.json().get("value", [])
+            return [m.get("cr_name", "")[:120] for m in messages if m.get("cr_name")]
+        except Exception as e:
+            print(f"[WARN] Could not fetch task activities: {e}")
+            return []
+
+    def build_session_summary(self, task_id: str, terminal_status: str,
+                              session_folder: Path, accumulated_stats: dict,
+                              phases: list, result_text: str,
+                              session_id: str = "") -> dict:
+        """Build the structured session summary JSON for auditing/telemetry.
+
+        Args:
+            task_id: Dataverse task ID
+            terminal_status: One of 'completed', 'failed', 'killed'
+            session_folder: Path to the OneDrive session folder
+            accumulated_stats: Merged stats from all phases
+            phases: List of phase dicts with per-phase stats
+            result_text: The final result text (will be truncated for preview)
+            session_id: Claude session ID (from the last phase, or first non-empty)
+
+        Returns:
+            dict: The summary JSON structure
+        """
+        # Determine dev box name
+        dev_box = socket.gethostname() or platform.node() or "unknown"
+
+        # Count unique models -> sub-agents heuristic
+        model_usage = accumulated_stats.get("model_usage", {})
+        num_sub_agents = max(0, len(model_usage) - 1)  # main model excluded
+
+        # Fetch activities from Dataverse messages
+        activities = self.fetch_task_activities(task_id)
+
+        summary = {
+            "session_id": session_id,
+            "task_id": task_id,
+            "dev_box": dev_box,
+            "working_dir": str(session_folder),
+            "total_duration_ms": accumulated_stats.get("total_duration_ms", 0),
+            "total_cost_usd": round(accumulated_stats.get("total_cost_usd", 0.0), 6),
+            "total_api_duration_ms": accumulated_stats.get("total_api_duration_ms", 0),
+            "total_turns": accumulated_stats.get("total_turns", 0),
+            "tokens": accumulated_stats.get("tokens", {
+                "input": 0, "output": 0, "cache_read": 0, "cache_creation": 0
+            }),
+            "model_usage": model_usage,
+            "num_sub_agents": num_sub_agents,
+            "phases": phases,
+            "activities": activities,
+            "terminal_status": terminal_status,
+            "result_preview": (result_text or "")[:200],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        return summary
+
+    def write_session_summary(self, task_id: str, terminal_status: str,
+                              session_folder: Path, accumulated_stats: dict,
+                              phases: list, result_text: str,
+                              session_id: str = ""):
+        """Build, persist, and upload the session summary.
+
+        1. Writes session_summary.json to the OneDrive session folder (primary storage).
+        2. Attempts to write to DV column crb3b_sessionsummary (graceful if column missing).
+        """
+        summary = self.build_session_summary(
+            task_id=task_id,
+            terminal_status=terminal_status,
+            session_folder=session_folder,
+            accumulated_stats=accumulated_stats,
+            phases=phases,
+            result_text=result_text,
+            session_id=session_id,
+        )
+
+        summary_json_str = json.dumps(summary, indent=2, default=str)
+
+        # 1. Write to file in session folder
+        summary_file = session_folder / "session_summary.json"
+        try:
+            summary_file.write_text(summary_json_str, encoding="utf-8")
+            print(f"[SUMMARY] Wrote session_summary.json ({len(summary_json_str)} bytes) to {summary_file}")
+        except Exception as e:
+            print(f"[ERROR] Could not write session_summary.json: {e}")
+
+        # 2. Write to Dataverse column (graceful if column doesn't exist)
+        try:
+            self.update_task(task_id, session_summary=summary_json_str)
+            print(f"[SUMMARY] Wrote session summary to DV column crb3b_sessionsummary")
+        except Exception as e:
+            print(f"[WARN] Could not write session summary to DV: {e}")
+
+        return summary
+
+    def write_session_log(self, summary: dict, session_folder: Path,
+                          result_text: str = "", folder_url: str = ""):
+        """Write a human-readable SESSION_LOG.md to the session folder.
+
+        Uses data already collected in the session summary dict to produce a
+        rich markdown file covering: task metadata, dev-box details, activity
+        log, results, session stats, and transcript reference.
+
+        Args:
+            summary: The session summary dict (from build_session_summary).
+            session_folder: Path to the OneDrive session folder.
+            result_text: Full final result text.
+            folder_url: OneDrive web URL for the session folder (may be empty).
+        """
+        try:
+            # --- Header ---
+            task_id = summary.get("task_id", "unknown")
+            session_id = summary.get("session_id", "")
+            dev_box = summary.get("dev_box", "unknown")
+            terminal_status = summary.get("terminal_status", "unknown")
+            timestamp = summary.get("timestamp", "")
+            working_dir = summary.get("working_dir", str(session_folder))
+
+            lines = [
+                "# SESSION LOG",
+                "",
+                "## Task Information",
+                "",
+                f"| Field | Value |",
+                f"|-------|-------|",
+                f"| Task ID | `{task_id}` |",
+                f"| Terminal Status | **{terminal_status}** |",
+                f"| Timestamp | {timestamp} |",
+                f"| Dev Box | `{dev_box}` |",
+                f"| Worker Version | `{self.current_version}` |",
+                f"| Claude Session ID | `{session_id}` |",
+                f"| Working Directory | `{working_dir}` |",
+            ]
+
+            if folder_url:
+                lines.append(f"| OneDrive URL | [Open in OneDrive]({folder_url}) |")
+
+            lines.append("")
+
+            # --- Session Stats ---
+            duration_ms = summary.get("total_duration_ms", 0)
+            duration_s = duration_ms / 1000.0 if duration_ms else 0
+            duration_min = duration_s / 60.0
+            cost_usd = summary.get("total_cost_usd", 0.0)
+            api_duration_ms = summary.get("total_api_duration_ms", 0)
+            total_turns = summary.get("total_turns", 0)
+            tokens = summary.get("tokens", {})
+            input_tokens = tokens.get("input", 0)
+            output_tokens = tokens.get("output", 0)
+            cache_read = tokens.get("cache_read", 0)
+            cache_creation = tokens.get("cache_creation", 0)
+
+            lines.extend([
+                "## Session Stats",
+                "",
+                f"| Metric | Value |",
+                f"|--------|-------|",
+                f"| Total Duration | {duration_min:.1f} min ({duration_s:.0f}s) |",
+                f"| API Duration | {api_duration_ms / 1000.0:.1f}s |",
+                f"| Total Cost | ${cost_usd:.4f} |",
+                f"| Total Turns | {total_turns} |",
+                f"| Input Tokens | {input_tokens:,} |",
+                f"| Output Tokens | {output_tokens:,} |",
+                f"| Cache Read Tokens | {cache_read:,} |",
+                f"| Cache Creation Tokens | {cache_creation:,} |",
+                f"| Sub-agents Used | {summary.get('num_sub_agents', 0)} |",
+                "",
+            ])
+
+            # --- Model Usage ---
+            model_usage = summary.get("model_usage", {})
+            if model_usage:
+                lines.extend([
+                    "## Model Usage",
+                    "",
+                    "| Model | Cost | Input Tokens | Output Tokens |",
+                    "|-------|------|-------------|---------------|",
+                ])
+                for model_id, mu in model_usage.items():
+                    m_cost = mu.get("cost_usd", 0.0)
+                    m_in = mu.get("input_tokens", 0)
+                    m_out = mu.get("output_tokens", 0)
+                    lines.append(f"| {model_id} | ${m_cost:.4f} | {m_in:,} | {m_out:,} |")
+                lines.append("")
+
+            # --- Phases ---
+            phases = summary.get("phases", [])
+            if phases:
+                lines.extend([
+                    "## Execution Phases",
+                    "",
+                    "| Phase | Cost | Duration | Turns |",
+                    "|-------|------|----------|-------|",
+                ])
+                for p in phases:
+                    p_name = p.get("phase", "?")
+                    p_cost = p.get("cost_usd", 0.0)
+                    p_dur = p.get("duration_ms", 0)
+                    p_turns = p.get("turns", 0)
+                    lines.append(f"| {p_name} | ${p_cost:.4f} | {p_dur / 1000.0:.1f}s | {p_turns} |")
+                lines.append("")
+
+            # --- Activity Log ---
+            activities = summary.get("activities", [])
+            if activities:
+                lines.extend([
+                    "## Activity Log",
+                    "",
+                ])
+                for idx, activity in enumerate(activities, 1):
+                    lines.append(f"{idx}. {activity}")
+                lines.append("")
+
+            # --- Final Results ---
+            lines.extend([
+                "## Final Results",
+                "",
+            ])
+            if result_text:
+                lines.append(result_text.strip())
+            else:
+                preview = summary.get("result_preview", "")
+                lines.append(preview if preview else "(no result text)")
+            lines.append("")
+
+            # --- Transcript Reference ---
+            lines.extend([
+                "## Transcript Reference",
+                "",
+                f"- Full transcript is stored in the Dataverse task record (`cr_transcript` column).",
+                f"- Task ID for lookup: `{task_id}`",
+            ])
+            if session_id:
+                lines.append(f"- Claude Code session ID: `{session_id}`")
+            lines.append("")
+
+            # --- Write file ---
+            log_content = "\n".join(lines)
+            log_file = session_folder / "SESSION_LOG.md"
+            log_file.write_text(log_content, encoding="utf-8")
+            print(f"[SESSION LOG] Wrote SESSION_LOG.md ({len(log_content)} bytes) to {log_file}")
+
+        except Exception as e:
+            print(f"[ERROR] Could not write SESSION_LOG.md: {e}")
+
+    def execute_with_autonomous_agent(self, task_prompt: str, task_id: str,
+                                      current_transcript: str, parsed_prompt_data: dict = None):
+        """
+        Execute task using the autonomous agent Worker/Verifier system
+
+        Args:
+            task_prompt: Structured prompt (description + contact rules + criteria)
+            task_id: Task ID for Dataverse updates
+            current_transcript: Current JSONL transcript
+        """
+        print(f"[AUTONOMOUS AGENT] Starting Worker/Verifier loop...")
+        task_start_time = time.time()
+
+        # Use LLM to parse the unstructured prompt (or reuse if already parsed)
+        if parsed_prompt_data:
+            print("[LLM PARSER] Using previously parsed prompt data")
+            parsed = parsed_prompt_data
+        else:
+            parsed = self.parse_prompt_with_llm(task_prompt)
+
+        task_description = parsed['task_description']
+        contact_rules = parsed['contact_rules'] or 'Only when blocked'
+        success_criteria = parsed['success_criteria']
+
+        # Create OneDrive session folder for this task
+        task_name = task_description[:50] if task_description else "unnamed_task"
+        session_folder = self.create_session_folder(task_name, task_id)
+
+        # Create autonomous agent instance
+        agent = AgentCLI()
+
+        # Setup project in the OneDrive session folder
+        project_folder = agent.setup_project(
+            task_description,
+            contact_rules,
+            success_criteria,
+            project_folder_path=session_folder
+        )
+
+        # Update task row with the OneDrive session folder path and URL
+        self.update_task(task_id, workingdir=str(session_folder))
+        folder_url = local_path_to_web_url(str(session_folder))
+        if folder_url and folder_url.startswith("http"):
+            self.update_task(task_id, onedriveurl=folder_url)
+
+        # Store project folder reference
+        transcript = current_transcript
+        transcript = self.append_to_transcript(
+            transcript,
+            "system",
+            f"Created project folder: {project_folder}"
+        )
+
+        self.update_task(
+            task_id,
+            status=STATUS_RUNNING,
+            status_message="Worker/Verifier loop started",
+            transcript=transcript
+        )
+
+        self.send_to_webhook(f"Starting Worker/Verifier loop\nProject: {project_folder}")
+
+        # Stats accumulation
+        accumulated_stats = {}
+        phases = []
+        last_session_id = ""
+
+        # Define streaming event callback
+        def streaming_event(event_type, data):
+            """Callback for streaming events from autonomous agent"""
+            if event_type == 'text':
+                # Send Claude's reasoning/thoughts
+                content = data.get('content', '').strip()
+                if content:
+                    # Send the actual text content to Dataverse
+                    self.send_to_webhook(content)
+            elif event_type == 'progress':
+                # Send periodic progress updates (every 30 seconds)
+                elapsed = data.get('elapsed', 0)
+                if elapsed > 0 and elapsed % 30 == 0:
+                    self.send_to_webhook(f"Still working... ({elapsed}s elapsed)")
+
+        def _record_phase(phase_name: str, phase_stats: dict):
+            """Record a phase and merge its stats into the accumulator."""
+            nonlocal accumulated_stats, last_session_id
+            merge_phase_stats(accumulated_stats, phase_stats)
+            phases.append({
+                "phase": phase_name,
+                "cost_usd": round(phase_stats.get("cost_usd", 0.0), 6),
+                "duration_ms": phase_stats.get("duration_ms", 0),
+                "turns": phase_stats.get("num_turns", 0),
+            })
+            if phase_stats.get("session_id"):
+                last_session_id = phase_stats["session_id"]
+
+        def _finalize_summary(terminal_status: str, result_text: str):
+            """Write the session summary and session log for any terminal state."""
+            try:
+                summary = self.write_session_summary(
+                    task_id=task_id,
+                    terminal_status=terminal_status,
+                    session_folder=session_folder,
+                    accumulated_stats=accumulated_stats,
+                    phases=phases,
+                    result_text=result_text,
+                    session_id=last_session_id,
+                )
+                self.write_session_log(
+                    summary=summary,
+                    session_folder=session_folder,
+                    result_text=result_text,
+                    folder_url=folder_url if folder_url else "",
+                )
+            except Exception as e:
+                print(f"[ERROR] Failed to write session summary: {e}")
+
+        try:
+            # Worker/Verifier loop
+            iteration = 1
+            verifier_feedback = None
+
+            while iteration <= 10:  # Max 10 iterations
+                print(f"\n[ITERATION {iteration}]")
+
+                # Update Dataverse
+                transcript = self.append_to_transcript(
+                    transcript,
+                    "system",
+                    f"Starting iteration {iteration}"
+                )
+                self.update_task(
+                    task_id,
+                    status_message=f"Worker iteration {iteration}",
+                    transcript=transcript
+                )
+
+                # Worker phase
+                status, output, worker_stats = agent.worker_loop(iteration, verifier_feedback, on_event=streaming_event)
+                _record_phase(f"worker_{iteration}", worker_stats)
+
+                # Log worker output
+                transcript = self.append_to_transcript(
+                    transcript,
+                    "worker",
+                    output
+                )
+                self.update_task(task_id, transcript=transcript)
+
+                if status == "blocked":
+                    # Task needs user input
+                    transcript = self.append_to_transcript(
+                        transcript,
+                        "system",
+                        f"Worker blocked: {output}"
+                    )
+
+                    self.update_task(
+                        task_id,
+                        status=STATUS_WAITING_FOR_INPUT,
+                        status_message=f"Blocked: {output}",
+                        transcript=transcript
+                    )
+
+                    self.send_to_webhook(
+                        f"Worker blocked\nReason: {output}\n\nWaiting for user input..."
+                    )
+
+                    # Write summary for blocked/failed terminal state
+                    _finalize_summary("failed", f"Blocked: {output}")
+
+                    # For now, fail the task - in production, wait for user response
+                    return False, f"Blocked: {output}", transcript, accumulated_stats
+
+                elif status == "done":
+                    # Verification phase
+                    print(f"\n[VERIFICATION]")
+
+                    transcript = self.append_to_transcript(
+                        transcript,
+                        "system",
+                        "Starting verification"
+                    )
+                    self.update_task(
+                        task_id,
+                        status_message=f"Verifying iteration {iteration}",
+                        transcript=transcript
+                    )
+
+                    approved, feedback, verifier_stats = agent.verify_work(output, on_event=streaming_event)
+                    _record_phase(f"verifier_{iteration}", verifier_stats)
+
+                    # Log verifier output
+                    transcript = self.append_to_transcript(
+                        transcript,
+                        "verifier",
+                        feedback if not approved else "APPROVED"
+                    )
+                    self.update_task(task_id, transcript=transcript)
+
+                    if approved:
+                        # Task completed successfully!
+                        print(f"\n[SUCCESS] Task approved by verifier")
+
+                        # Create summary
+                        print(f"\n[SUMMARIZER] Creating final summary...")
+                        self.send_to_webhook("Creating summary of results...")
+
+                        summary, summarizer_stats = agent.create_summary(on_event=streaming_event)
+                        _record_phase("summarizer", summarizer_stats)
+
+                        # Log summary creation
+                        transcript = self.append_to_transcript(
+                            transcript,
+                            "summarizer",
+                            "SUMMARY CREATED"
+                        )
+                        self.update_task(task_id, transcript=transcript)
+
+                        # Build concise bullet-style result with OneDrive links
+                        result_folder_url = folder_url if folder_url else str(session_folder)
+                        final_result = f"{summary}\n\n- Session folder: [View in OneDrive]({result_folder_url})"
+
+                        # Write session summary for completed state
+                        _finalize_summary("completed", final_result)
+
+                        return True, final_result, transcript, accumulated_stats
+
+                    else:
+                        # Verification failed, loop back to worker
+                        print(f"\n[RETRY] Verification failed, providing feedback to worker")
+
+                        self.send_to_webhook(
+                            f"Verification failed (iteration {iteration}). Retrying with feedback..."
+                        )
+
+                        verifier_feedback = feedback
+                        iteration += 1
+                        continue
+
+            # Max iterations reached
+            max_iter_msg = f"Max iterations ({iteration-1}) reached without approval"
+            _finalize_summary("failed", max_iter_msg)
+            return False, max_iter_msg, transcript, accumulated_stats
+
+        except Exception as e:
+            error_msg = f"Error during autonomous execution: {e}"
+            print(f"[ERROR] {error_msg}")
+
+            transcript = self.append_to_transcript(
+                transcript,
+                "system",
+                f"[ERROR] {error_msg}"
+            )
+
+            # Write summary for error/failed terminal state
+            _finalize_summary("failed", error_msg)
+
+            return False, error_msg, transcript, accumulated_stats
+
+    def process_task(self, task: dict):
+        """Process a single task using autonomous agent.
+
+        Uses ETag-based atomic claiming to prevent double-pickup, and
+        queues the task if this dev box is already running another task.
+        """
+        task_id = task.get("cr_shraga_taskid")
+        task_name = task.get("cr_name", "Unnamed")
+        prompt = task.get("cr_prompt", "")
+        transcript = task.get("cr_transcript", "")
+
+        print(f"\n{'='*80}")
+        print(f"[TASK] Processing: {task_name}")
+        print(f"[ID] {task_id}")
+        print(f"{'='*80}")
+
+        # Check if dev box is already running a task
+        if self.is_devbox_busy():
+            print(f"[QUEUE] Dev box {MACHINE_NAME} is busy, queuing task {task_id}")
+            self.queue_task(task)
+            return False
+
+        # Atomically claim the task using ETag (prevents double-pickup)
+        if not self.claim_task(task):
+            print(f"[SKIP] Could not claim task {task_id}, moving on")
+            return False
+
+        self.current_task_id = task_id  # Track for message correlation
+
+        # Log task start in transcript
+        transcript = self.append_to_transcript(
+            transcript,
+            "system",
+            "[Task started with autonomous agent]"
+        )
+
+        self.update_task(
+            task_id,
+            status_message="Starting autonomous agent",
+            transcript=transcript
+        )
+
+        # Parse prompt with LLM to extract task description for notification
+        parsed_prompt = self.parse_prompt_with_llm(prompt)
+        task_description = parsed_prompt.get('task_description', '')[:300]
+        if len(parsed_prompt.get('task_description', '')) > 300:
+            task_description += "..."
+
+        # Send task start notification with details
+        start_msg = f"""Starting task: {task_name}
+
+Description: {task_description if task_description else "No description provided"}
+
+Task ID: {task_id}
+Worker/Verifier loop initiated..."""
+
+        self.send_to_webhook(start_msg)
+
+        # Execute with autonomous agent (pass parsed prompt to avoid reparsing)
+        success, result, final_transcript, session_stats = self.execute_with_autonomous_agent(
+            prompt,
+            task_id,
+            transcript,
+            parsed_prompt_data=parsed_prompt  # Reuse parsed data
+        )
+
+        # Append session numbers to the result text
+        session_numbers = format_session_numbers(session_stats)
+        if session_numbers:
+            result = result + session_numbers
+
+        # Update final status
+        if success:
+            # Commit results to Git for audit trail
+            commit_sha = self.commit_task_results(task_id, self.work_base_dir)
+
+            # Prepare result with Git commit info
+            result_with_git = result
+            if commit_sha:
+                result_with_git = f"{result}\n\n[Git Commit: {commit_sha[:8]}]"
+
+            self.update_task(
+                task_id,
+                status=STATUS_COMPLETED,
+                status_message="Task completed and verified",
+                result=result_with_git,
+                transcript=final_transcript
+            )
+
+            # Send completion message with full result and Git info
+            git_info = f"\nGit Commit: {commit_sha[:8]}" if commit_sha else ""
+            completion_msg = f"""Task completed: {task_name}
+
+Result:
+{result}
+
+Full details saved in Dataverse (Task ID: {task_id}){git_info}"""
+
+            self.send_to_webhook(completion_msg)
+
+            print(f"[TASK] Completed: {task_name}\n")
+            self.current_task_id = None
+
+            # Promote any queued tasks on this dev box now that we're free
+            self.promote_queued_tasks()
+
+            return True
+        else:
+            self.update_task(
+                task_id,
+                status=STATUS_FAILED,
+                status_message="Task failed",
+                result=f"Error: {result}",
+                transcript=final_transcript
+            )
+
+            # Send failure message with error details
+            failure_msg = f"""Task failed: {task_name}
+
+Error details:
+{result}
+
+Full transcript saved in Dataverse (Task ID: {task_id})"""
+
+            self.send_to_webhook(failure_msg)
+
+            print(f"[TASK] Failed: {task_name}\n")
+            self.current_task_id = None
+
+            # Promote any queued tasks on this dev box now that we're free
+            self.promote_queued_tasks()
+
+            return False
+
+    def run(self):
+        """Main worker loop"""
+        if sys.platform == "win32":
+            sys.stdout.reconfigure(encoding='utf-8')
+            sys.stderr.reconfigure(encoding='utf-8')
+
+        print("="*80)
+        print("INTEGRATED TASK WORKER (with Autonomous Agent)")
+        print("="*80)
+        print(f"Dataverse: {DATAVERSE_URL}")
+        print(f"Table: {TABLE}")
+        print(f"Dev box: {MACHINE_NAME}")
+        print(f"Autonomous Agent Dir: {self.work_base_dir}")
+        print("="*80)
+
+        # Get current user
+        if not self.current_user_id:
+            print("Identifying user...")
+            if not self.get_current_user():
+                print("[FATAL] Could not identify user")
+                return
+
+        print(f"Worker started for user: {self.current_user_id}")
+        print(f"Current version: {self.current_version}")
+        print("\n[POLLING] Monitoring for pending tasks...\n")
+
+        # Send startup notification
+        self.send_to_webhook(f"Worker started (v{self.current_version}) on {MACHINE_NAME}")
+
+        try:
+            while True:
+                # Poll for pending tasks
+                tasks = self.poll_pending_tasks()
+
+                if tasks:
+                    print(f"[FOUND] {len(tasks)} pending task(s)")
+
+                    for task in tasks:
+                        self.process_task(task)
+                else:
+                    # IDLE - Check for updates (every 10 minutes)
+                    now = datetime.now(tz=timezone.utc)
+                    if self.last_update_check is None or (now - self.last_update_check) >= self.update_check_interval:
+                        print("[IDLE] Checking for updates...")
+                        self.last_update_check = now
+
+                        if self.check_for_updates():
+                            # New version available, apply update
+                            self.send_to_webhook("Updating worker to new version...")
+                            self.apply_update()
+                            # apply_update() exits, so this line never runs
+
+                # Poll every 10 seconds (autonomous agent takes longer)
+                time.sleep(10)
+
+        except KeyboardInterrupt:
+            print("\n\n[INTERRUPT] Stopping worker...")
+            self._cleanup_in_progress_task("Worker interrupted by user")
+            self.send_to_webhook("Task worker stopped")
+        except Exception as e:
+            print(f"\n[FATAL ERROR] {e}")
+            self._cleanup_in_progress_task(f"Worker fatal error: {e}")
+            self.send_to_webhook(f"Worker error: {e}")
+
+        print("[SHUTDOWN] Worker stopped")
+
+    def _cleanup_in_progress_task(self, reason: str):
+        """Mark the current in-progress task as failed so it doesn't stay stuck in RUNNING."""
+        if self.current_task_id:
+            print(f"[CLEANUP] Marking task {self.current_task_id} as failed: {reason}")
+            self.update_task(
+                self.current_task_id,
+                status=STATUS_FAILED,
+                status_message=f"Worker shutdown: {reason}"
+            )
+            self.current_task_id = None
+
+if __name__ == "__main__":
+    worker = IntegratedTaskWorker()
+    worker.run()
