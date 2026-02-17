@@ -28,28 +28,24 @@ $userEmail = az account show --query "user.name" -o tsv
 $userOid = az ad signed-in-user show --query "id" -o tsv
 Write-Host "  Signed in as: $userEmail" -ForegroundColor Green
 
-# Step 2: Determine dev box name
-$prefix = ($userEmail -split "@")[0] -replace "\.", "-"
-$DevBoxName = "shraga-$prefix"
+# Step 2: Determine dev box name (shraga-box-01, 02, 03...)
 Write-Host ""
-Write-Host "[2/6] Provisioning dev box: $DevBoxName" -ForegroundColor Yellow
-
-# Check if already exists
+Write-Host "[2/6] Finding next available dev box name..." -ForegroundColor Yellow
 $token = az account get-access-token --resource "https://devcenter.azure.com" --query "accessToken" -o tsv
 $headers = @{ "Authorization" = "Bearer $token"; "User-Agent" = "Shraga-Setup/1.0" }
 
-try {
-    $existing = Invoke-RestMethod -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName`?api-version=$ApiVersion" -Headers $headers -ErrorAction SilentlyContinue
-    if ($existing.provisioningState -eq "Succeeded") {
-        Write-Host "  Dev box already exists and is ready!" -ForegroundColor Green
-        $skip_provision = $true
-    } elseif ($existing.provisioningState) {
-        Write-Host "  Dev box exists (state: $($existing.provisioningState))" -ForegroundColor Yellow
-        $skip_provision = $true
-    }
-} catch {
-    $skip_provision = $false
-}
+$existingBoxes = (Invoke-RestMethod -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes`?api-version=$ApiVersion" -Headers $headers).value
+$shragaBoxes = $existingBoxes | Where-Object { $_.name -match "^shraga-box-\d+$" }
+$usedNumbers = $shragaBoxes | ForEach-Object { [int]($_.name -replace "shraga-box-", "") }
+
+$nextNum = 1
+while ($usedNumbers -contains $nextNum) { $nextNum++ }
+$DevBoxName = "shraga-box-{0:D2}" -f $nextNum
+
+Write-Host "  Existing shraga boxes: $($shragaBoxes.Count)" -ForegroundColor Gray
+Write-Host "  New dev box: $DevBoxName" -ForegroundColor Green
+
+$skip_provision = $false
 
 if (-not $skip_provision) {
     # Create dev box
@@ -127,7 +123,18 @@ $token = az account get-access-token --resource "https://devcenter.azure.com" --
 $headers = @{ "Authorization" = "Bearer $token"; "Content-Type" = "application/json"; "User-Agent" = "Shraga-Setup/1.0" }
 
 $deployCmd = @"
-powercfg /change monitor-timeout-ac 0; powercfg /change standby-timeout-ac 0; powercfg /change hibernate-timeout-ac 0; powercfg /change disk-timeout-ac 0; powercfg /hibernate off; reg add 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' /v fResetBroken /t REG_DWORD /d 0 /f; & 'C:\Program Files\Git\cmd\git.exe' clone --single-branch --depth 1 https://github.com/SagiKat/shraga-worker.git 'C:\Dev\shraga-worker'; & 'C:\Python312\python.exe' -m pip install requests azure-identity azure-core watchdog; `$action = New-ScheduledTaskAction -Execute 'C:\Python312\python.exe' -Argument 'C:\Dev\shraga-worker\integrated_task_worker.py' -WorkingDirectory 'C:\Dev\shraga-worker'; `$trigger = New-ScheduledTaskTrigger -AtStartup; Register-ScheduledTask -TaskName 'ShragaWorker' -Action `$action -Trigger `$trigger -User 'SYSTEM' -RunLevel Highest -Force; Start-ScheduledTask -TaskName 'ShragaWorker'
+powercfg /change monitor-timeout-ac 0; powercfg /change standby-timeout-ac 0; powercfg /change hibernate-timeout-ac 0; powercfg /change disk-timeout-ac 0; powercfg /hibernate off; reg add 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' /v fResetBroken /t REG_DWORD /d 0 /f; & 'C:\Program Files\Git\cmd\git.exe' clone --single-branch --depth 1 https://github.com/SagiKat/shraga-worker.git 'C:\Dev\shraga-worker'; & 'C:\Python312\python.exe' -m pip install requests azure-identity azure-core watchdog; `$action = New-ScheduledTaskAction -Execute 'C:\Python312\python.exe' -Argument 'C:\Dev\shraga-worker\integrated_task_worker.py' -WorkingDirectory 'C:\Dev\shraga-worker'; `$trigger = New-ScheduledTaskTrigger -AtStartup; Register-ScheduledTask -TaskName 'ShragaWorker' -Action `$action -Trigger `$trigger -User 'SYSTEM' -RunLevel Highest -Force; Set-Content -Path 'C:\Users\Public\Desktop\Shraga-Authenticate.ps1' -Value @'
+Write-Host '=== Shraga Authentication ===' -ForegroundColor Cyan
+Write-Host ''
+Write-Host 'Step 1: Azure login...' -ForegroundColor Yellow
+az login
+Write-Host ''
+Write-Host 'Step 2: Claude Code login...' -ForegroundColor Yellow
+claude /login
+Write-Host ''
+Write-Host 'All done! You can close this window.' -ForegroundColor Green
+Read-Host 'Press Enter to close'
+'@; `$ws = New-Object -ComObject WScript.Shell; `$sc = `$ws.CreateShortcut('C:\Users\Public\Desktop\Shraga - Click to Authenticate.lnk'); `$sc.TargetPath = 'powershell.exe'; `$sc.Arguments = '-ExecutionPolicy Bypass -File C:\Users\Public\Desktop\Shraga-Authenticate.ps1'; `$sc.Save()
 "@
 
 $deployBody = @{
@@ -172,18 +179,19 @@ $conn = Invoke-RestMethod -Uri "$DevCenterEndpoint/projects/$Project/users/me/de
 $webUrl = $conn.webUrl
 Write-Host "  Web RDP: $webUrl" -ForegroundColor Green
 
-# Step 6: Auth on the dev box
+# Step 6: Final step
 Write-Host ""
-Write-Host "[6/6] Final step: authenticate on your dev box" -ForegroundColor Yellow
+Write-Host "[6/6] Almost done!" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "  Open this link in your browser:" -ForegroundColor White
-Write-Host "  $webUrl" -ForegroundColor Cyan
+Write-Host "  Your dev box is ready. One last step:" -ForegroundColor White
 Write-Host ""
-Write-Host "  Then in the dev box, open PowerShell and run:" -ForegroundColor White
-Write-Host "  az login" -ForegroundColor Cyan
-Write-Host "  claude /login" -ForegroundColor Cyan
+Write-Host "  1. Open this link:" -ForegroundColor White
+Write-Host "     $webUrl" -ForegroundColor Cyan
+Write-Host ""
+Write-Host '  2. Double-click "Shraga - Click to Authenticate" on the desktop' -ForegroundColor White
+Write-Host "     (it will open two browser sign-in windows — just sign in)" -ForegroundColor Gray
 Write-Host ""
 Write-Host "================================" -ForegroundColor Green
-Write-Host "  Setup complete!" -ForegroundColor Green
-Write-Host "  Your dev box: $DevBoxName" -ForegroundColor Green
+Write-Host "  Dev box: $DevBoxName" -ForegroundColor Green
+Write-Host "  Status: Ready" -ForegroundColor Green
 Write-Host "================================" -ForegroundColor Green
