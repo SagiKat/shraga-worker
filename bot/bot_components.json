@@ -1,0 +1,69 @@
+{
+  "source": "https://org3e79cdb1.crm3.dynamics.com/api/data/v9.2/botcomponents",
+  "environment": "8660590d-33ac-ecd8-aef3-e4dd0d6071f4",
+  "exported": "2026-02-16",
+  "component_types": {
+    "9": "Topic",
+    "10": "Localized Topic",
+    "15": "Bot/Agent"
+  },
+  "shraga_components": [
+    {
+      "name": "Shraga",
+      "type": 15,
+      "id": "cef8fcbf-8bac-40a6-9c1d-10f9f3023f9d",
+      "description": "Shraga bot agent"
+    },
+    {
+      "name": "Fallback",
+      "type": 9,
+      "id": "928c6921-eb36-450f-b2bc-9ad966b3f02e",
+      "description": "Main Fallback topic - relays messages to SendMessage flow with follow-up loop"
+    },
+    {
+      "name": "SendMessage",
+      "type": 9,
+      "id": "f1c8960a-b669-41d5-a92b-0db9c1248f2c",
+      "description": "SendMessage flow topic component"
+    },
+    {
+      "name": "ShragaRelay",
+      "type": 9,
+      "id": "2c90bce4-6d0a-f111-8406-002248d570fd",
+      "description": "ShragaRelay topic component"
+    }
+  ],
+  "all_non_localized_components": [
+    {"name": "Agent", "type": 15, "id": "5f332538-8e99-4857-af81-d1d193b01078"},
+    {"name": "Shraga", "type": 15, "id": "cef8fcbf-8bac-40a6-9c1d-10f9f3023f9d"},
+    {"name": "stam", "type": 15, "id": "fa8df129-01bb-4b42-aa22-0e35995b8f02"},
+    {"name": "AppCopilot DV Table Context", "type": 9, "id": "0928520b-68c9-43d3-a13c-3c30c41d735d"},
+    {"name": "AppCopilot.GetFeatureSetting", "type": 9, "id": "b33033bd-6eab-458d-8730-15a5f9c3c6bb"},
+    {"name": "BingSearchFallback", "type": 9, "id": "263a55cd-a7dd-4cea-8121-f30df7caabd7"},
+    {"name": "BPA Describe Copilot Capabilities", "type": 9, "id": "c288a9f8-9e6e-4c20-872f-092553c16369"},
+    {"name": "BPA Fallback", "type": 9, "id": "2a9f1bbd-c9ce-4806-a6fc-e828d3bcae04"},
+    {"name": "BPA Report Context - Message Trigger", "type": 9, "id": "9e1fdae6-a224-46be-9207-ee01b1270128"},
+    {"name": "BPA Sparks", "type": 9, "id": "b453dec2-050f-4b16-962d-80aa21eec71e"},
+    {"name": "BPP Data QnA", "type": 9, "id": "943a5ed5-a735-415e-8df4-295889a3b691"},
+    {"name": "BPP Describe Copilot Capabilities", "type": 9, "id": "bbc69fa2-b3bf-4836-a6ca-d48fd30da094"},
+    {"name": "BPP Sparks", "type": 9, "id": "f7ef5df9-72de-4811-a984-9a5ae8ed61d3"},
+    {"name": "Conversation Start", "type": 9, "id": "8498f13e-0c0e-4bba-8c84-35fb1b565e4a"},
+    {"name": "Conversational boosting", "type": 9, "id": "6a66a544-2bff-49ce-af32-18a9ac70e7ee"},
+    {"name": "End of Conversation", "type": 9, "id": "e31ec897-29fc-4b10-841c-c243c29074dc"},
+    {"name": "Escalate", "type": 9, "id": "a5bef981-1855-40c4-94e4-12302f8971b9"},
+    {"name": "Fallback", "type": 9, "id": "928c6921-eb36-450f-b2bc-9ad966b3f02e"},
+    {"name": "Goodbye", "type": 9, "id": "aea23670-5cae-42ce-b5f9-396f6e96a879"},
+    {"name": "Greeting", "type": 9, "id": "7bc46db2-9378-420d-8c5d-1b2d41a2f2db"},
+    {"name": "Multiple Topics Matched", "type": 9, "id": "115f73ce-197c-4b01-b638-434880036796"},
+    {"name": "On Error", "type": 9, "id": "a6d0ca45-b3a9-4136-9b9c-073a2af7c6c3"},
+    {"name": "Reset Conversation", "type": 9, "id": "458ed6da-c620-46e6-8223-0d0469a9a442"},
+    {"name": "SendMessage", "type": 9, "id": "f1c8960a-b669-41d5-a92b-0db9c1248f2c"},
+    {"name": "ShragaRelay", "type": 9, "id": "2c90bce4-6d0a-f111-8406-002248d570fd"},
+    {"name": "Sign in", "type": 9, "id": "1da01571-c459-4175-a0a8-846297c6fd3a"},
+    {"name": "stami", "type": 9, "id": "f4fc0fcd-d686-44d6-829f-17b2a96e4917"},
+    {"name": "StamiUpdate", "type": 9, "id": "f82debf8-6c7a-44eb-99e4-3b8f8ffb23d7"},
+    {"name": "Start Over", "type": 9, "id": "c91c9de5-f2f7-4496-8579-26b989fa4157"},
+    {"name": "Thank you", "type": 9, "id": "e81b4d90-5b4d-48b8-bc86-18812bda637c"},
+    {"name": "Turn", "type": 9, "id": "0321023a-ed8d-4834-a478-22300c90a1e6"}
+  ]
+}

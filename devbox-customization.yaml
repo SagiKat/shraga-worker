@@ -1,0 +1,95 @@
+$schema: "1.0"
+name: "shraga-dev-environment"
+description: "Dev Box with Claude Code, development tools, and OneDrive SSO"
+
+tasks:
+  # Install Git (required for Claude Code)
+  - name: winget
+    parameters:
+      package: Git.Git
+    timeout: 600
+
+  # Install Visual Studio Code
+  - name: winget
+    parameters:
+      package: Microsoft.VisualStudioCode
+    timeout: 600
+
+  # Install Node.js LTS (useful for development)
+  - name: winget
+    parameters:
+      package: OpenJS.NodeJS.LTS
+    timeout: 600
+
+  # Install Claude Code
+  - name: winget
+    parameters:
+      package: Anthropic.ClaudeCode
+    timeout: 900
+
+  # Install Python (for orchestrator/worker scripts)
+  - name: winget
+    parameters:
+      package: Python.Python.3.12
+    timeout: 600
+
+  # Configure Git global settings
+  - name: powershell
+    parameters:
+      command: |
+        git config --global core.autocrlf true
+        git config --global init.defaultBranch main
+    timeout: 60
+
+  # Install Python packages for Shraga
+  - name: powershell
+    parameters:
+      command: |
+        python -m pip install --upgrade pip
+        pip install requests azure-identity
+    timeout: 300
+
+  # Configure OneDrive Silent Account Configuration
+  - name: powershell
+    parameters:
+      command: |
+        $regPath = 'HKLM:\SOFTWARE\Policies\Microsoft\OneDrive'
+        if (!(Test-Path $regPath)) {
+          New-Item -Path $regPath -Force | Out-Null
+        }
+        New-ItemProperty -Path $regPath -Name 'SilentAccountConfig' -Value 1 -PropertyType DWORD -Force | Out-Null
+        Write-Host "OneDrive Silent Account Configuration enabled"
+    timeout: 60
+
+  # Set environment variables for development
+  - name: powershell
+    parameters:
+      command: |
+        # Add Git to PATH if not already there
+        $gitPath = "C:\Program Files\Git\cmd"
+        $currentPath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        if ($currentPath -notlike "*$gitPath*") {
+          [Environment]::SetEnvironmentVariable("Path", "$currentPath;$gitPath", "Machine")
+        }
+
+        # Verify installations
+        Write-Host "Verifying installations..."
+        git --version
+        node --version
+        python --version
+        claude --version
+    timeout: 120
+
+# User-specific tasks (run after first sign-in)
+userTasks:
+  # Clone Shraga worker repository
+  - name: powershell
+    parameters:
+      command: |
+        $repoPath = "C:\Dev\shraga-worker"
+        if (!(Test-Path $repoPath)) {
+          git clone https://msazure.visualstudio.com/DefaultCollection/CCI/_git/Users --branch users/sagik/shraga-worker $repoPath
+          Write-Host "Shraga worker repository cloned to $repoPath"
+        } else {
+          Write-Host "Repository already exists at $repoPath"
+        }

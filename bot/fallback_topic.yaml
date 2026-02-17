@@ -1,0 +1,51 @@
+kind: AdaptiveDialog
+beginDialog:
+  kind: OnUnknownIntent
+  id: main
+  actions:
+    - kind: SetVariable
+      id: setVariable_isFollowup
+      variable: Topic.IsFollowup
+      value: =false
+
+    - kind: InvokeFlowAction
+      id: invokeFlowAction_main
+      input:
+        binding:
+          text: =System.User.Email
+          text_1: =System.Conversation.Id
+          text_2: =System.Activity.Text
+          boolean: =Topic.IsFollowup
+
+      output:
+        binding:
+          responsetext: Topic.Response
+          isfollowupexpecterd: Topic.IsFollowupExpected
+
+      flowId: 68c91f74-85d8-0fec-b574-8ae9f315453b
+
+    - kind: SendActivity
+      id: sendActivity_response
+      activity: "{Topic.Response}"
+
+    - kind: ConditionGroup
+      id: conditionGroup_followup
+      conditions:
+        - id: conditionItem_checkFollowup
+          condition: =Topic.IsFollowupExpected = PlainText("true")
+
+      elseActions:
+        - kind: EndDialog
+          id: endDialog_done
+
+    - kind: SetVariable
+      id: setVariable_followupTrue
+      variable: Topic.IsFollowup
+      value: =true
+
+    - kind: GotoAction
+      id: gotoAction_loop
+      actionId: invokeFlowAction_main
+
+inputType: {}
+outputType: {}

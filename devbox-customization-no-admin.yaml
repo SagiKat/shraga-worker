@@ -1,0 +1,186 @@
+$schema: "1.0"
+name: "shraga-dev-no-admin"
+description: "Shraga development environment - works without admin permissions"
+
+# NOTE: Using userTasks only (runs after first sign-in as current user)
+# These do NOT require admin rights
+
+userTasks:
+  # Install Git (required for Claude Code)
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host "Installing Git..."
+        winget install --id Git.Git --silent --accept-package-agreements --accept-source-agreements
+        Write-Host "Git installation complete"
+
+  # Install Visual Studio Code
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host "Installing VS Code..."
+        winget install --id Microsoft.VisualStudioCode --silent --accept-package-agreements --accept-source-agreements
+        Write-Host "VS Code installation complete"
+
+  # Install Node.js LTS
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host "Installing Node.js..."
+        winget install --id OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements
+        Write-Host "Node.js installation complete"
+
+  # Install Claude Code
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host "Installing Claude Code..."
+        winget install --id Anthropic.ClaudeCode --silent --accept-package-agreements --accept-source-agreements
+        Write-Host "Claude Code installation complete"
+
+  # Install Python
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host "Installing Python 3.12..."
+        winget install --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements
+        Write-Host "Python installation complete"
+
+  # Refresh environment and install Python packages
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host "Installing Python packages..."
+        # Refresh PATH
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+        python -m pip install --upgrade pip --quiet
+        pip install requests azure-identity --quiet
+        Write-Host "Python packages installed"
+
+  # Test OneDrive SSO status (no admin needed, just checks)
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host "`n========================================" -ForegroundColor Cyan
+        Write-Host "OneDrive SSO Status Check" -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+
+        # Check if OneDrive is running
+        $onedriveProcess = Get-Process -Name "OneDrive" -ErrorAction SilentlyContinue
+        if ($onedriveProcess) {
+          Write-Host "✓ OneDrive process is running" -ForegroundColor Green
+        } else {
+          Write-Host "! OneDrive is not running" -ForegroundColor Yellow
+        }
+
+        # Check PRT status (Primary Refresh Token)
+        Write-Host "`nChecking Azure AD SSO status..." -ForegroundColor Yellow
+        $dsregOutput = dsregcmd /status
+        $azureAdPrt = $dsregOutput | Select-String "AzureAdPrt"
+
+        if ($azureAdPrt -like "*YES*") {
+          Write-Host "✓ Primary Refresh Token (PRT): PRESENT" -ForegroundColor Green
+          Write-Host "  → OneDrive should auto-sign-in without registry key!" -ForegroundColor Green
+        } else {
+          Write-Host "✗ Primary Refresh Token (PRT): NOT FOUND" -ForegroundColor Red
+          Write-Host "  → OneDrive may require manual sign-in" -ForegroundColor Yellow
+        }
+
+        # Check for signed-in OneDrive account
+        $onedriveSettingsPath = "$env:LOCALAPPDATA\Microsoft\OneDrive\settings"
+        if (Test-Path $onedriveSettingsPath) {
+          $businessFolders = Get-ChildItem -Path $onedriveSettingsPath -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "Business*" }
+
+          if ($businessFolders) {
+            Write-Host "✓ OneDrive for Business: CONFIGURED ($($businessFolders.Count) account(s))" -ForegroundColor Green
+          } else {
+            Write-Host "! OneDrive for Business: NOT YET CONFIGURED" -ForegroundColor Yellow
+            Write-Host "  → May auto-configure on next sign-in" -ForegroundColor Gray
+          }
+        }
+
+        Write-Host "`n========================================" -ForegroundColor Cyan
+        Write-Host "Test Result: SSO via PRT (Azure AD join)" -ForegroundColor Cyan
+        Write-Host "No HKLM registry key needed if PRT exists" -ForegroundColor Cyan
+        Write-Host "========================================`n" -ForegroundColor Cyan
+
+  # Clone Shraga worker repository
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host "Cloning Shraga worker repository..."
+
+        # Refresh PATH
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+        $repoPath = "C:\Dev\shraga-worker"
+        if (!(Test-Path $repoPath)) {
+          New-Item -ItemType Directory -Force -Path "C:\Dev" | Out-Null
+          git clone https://msazure.visualstudio.com/DefaultCollection/CCI/_git/Users --branch users/sagik/shraga-worker $repoPath
+          Write-Host "✓ Repository cloned to $repoPath" -ForegroundColor Green
+        } else {
+          Write-Host "! Repository already exists at $repoPath" -ForegroundColor Yellow
+        }
+
+  # Setup kiosk auth helper
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host "Setting up kiosk authentication helper..." -ForegroundColor Yellow
+
+        # Create shraga data directory
+        New-Item -ItemType Directory -Force -Path "C:\ProgramData\shraga" | Out-Null
+
+        Write-Host "✓ Kiosk auth helper ready at C:\Dev\shraga-worker\kiosk-auth-helper.ps1" -ForegroundColor Green
+
+  # Final verification
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host "`n========================================" -ForegroundColor Cyan
+        Write-Host "Installation Verification" -ForegroundColor Cyan
+        Write-Host "========================================`n" -ForegroundColor Cyan
+
+        # Refresh PATH
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+        Write-Host "Checking installed tools..." -ForegroundColor Yellow
+
+        try {
+          $gitVersion = git --version
+          Write-Host "✓ Git: $gitVersion" -ForegroundColor Green
+        } catch {
+          Write-Host "✗ Git: NOT FOUND" -ForegroundColor Red
+        }
+
+        try {
+          $claudeVersion = claude --version
+          Write-Host "✓ Claude Code: $claudeVersion" -ForegroundColor Green
+        } catch {
+          Write-Host "✗ Claude Code: NOT FOUND (may need to restart shell)" -ForegroundColor Yellow
+        }
+
+        try {
+          $nodeVersion = node --version
+          Write-Host "✓ Node.js: $nodeVersion" -ForegroundColor Green
+        } catch {
+          Write-Host "✗ Node.js: NOT FOUND" -ForegroundColor Red
+        }
+
+        try {
+          $pythonVersion = python --version
+          Write-Host "✓ Python: $pythonVersion" -ForegroundColor Green
+        } catch {
+          Write-Host "✗ Python: NOT FOUND" -ForegroundColor Red
+        }
+
+        Write-Host "`n========================================" -ForegroundColor Cyan
+        Write-Host "Setup Complete!" -ForegroundColor Green
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "`nNext steps:" -ForegroundColor Yellow
+        Write-Host "1. Close and reopen your terminal to refresh PATH" -ForegroundColor White
+        Write-Host "2. Kiosk auth will be triggered by orchestrator when needed" -ForegroundColor White
+        Write-Host "3. Check if OneDrive auto-signed-in" -ForegroundColor White
+        Write-Host "4. Run C:\Dev\shraga-worker\verify-devbox-setup.ps1" -ForegroundColor White
+        Write-Host "========================================`n" -ForegroundColor Cyan

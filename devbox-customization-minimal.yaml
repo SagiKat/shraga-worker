@@ -1,0 +1,23 @@
+$schema: "1.0"
+name: "claude-code-minimal"
+description: "Minimal test - just Claude Code and Git"
+
+tasks:
+  # Install Git (required for Claude Code)
+  - name: winget
+    parameters:
+      package: Git.Git
+
+  # Install Claude Code
+  - name: winget
+    parameters:
+      package: Anthropic.ClaudeCode
+
+  # Verify installation
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host "=== Verifying Installations ==="
+        git --version
+        claude --version
+        Write-Host "=== Installation Complete ==="

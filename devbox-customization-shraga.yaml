@@ -1,0 +1,218 @@
+$schema: "1.0"
+name: "shraga-dev-environment"
+description: "Dev Box for Shraga autonomous task execution - Dataverse communication + Git results"
+
+tasks:
+  # Install Git (required for Claude Code)
+  - name: winget
+    parameters:
+      package: Git.Git
+    timeout: 600
+
+  # Install Claude Code
+  - name: winget
+    parameters:
+      package: Anthropic.ClaudeCode
+    timeout: 900
+
+  # Install Python (for worker scripts)
+  - name: winget
+    parameters:
+      package: Python.Python.3.12
+    timeout: 600
+
+  # Install Python packages
+  - name: powershell
+    parameters:
+      command: |
+        python -m pip install --upgrade pip
+        pip install requests azure-identity watchdog
+    timeout: 300
+
+  # Configure Git
+  - name: powershell
+    parameters:
+      command: |
+        git config --global core.autocrlf true
+        git config --global init.defaultBranch main
+    timeout: 60
+
+# User-specific tasks (run after first sign-in)
+userTasks:
+  # Verify and setup OneDrive Shraga folders
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host "=== Shraga Dev Box Setup ===" -ForegroundColor Cyan
+        Write-Host ""
+
+        # Check OneDrive status
+        Write-Host "Checking OneDrive..." -ForegroundColor Yellow
+        $oneDriveFolder = "$env:USERPROFILE\OneDrive - Microsoft"
+
+        if (Test-Path $oneDriveFolder) {
+          Write-Host "✅ OneDrive - Microsoft: $oneDriveFolder" -ForegroundColor Green
+
+          # Create Shraga folder structure
+          Write-Host "Creating Shraga folder structure..." -ForegroundColor Yellow
+          $shragaPath = Join-Path $oneDriveFolder "Shraga"
+
+          New-Item -Path "$shragaPath\tasks\pending" -ItemType Directory -Force | Out-Null
+          New-Item -Path "$shragaPath\tasks\in-progress" -ItemType Directory -Force | Out-Null
+          New-Item -Path "$shragaPath\tasks\completed" -ItemType Directory -Force | Out-Null
+          New-Item -Path "$shragaPath\workers" -ItemType Directory -Force | Out-Null
+          New-Item -Path "$shragaPath\logs" -ItemType Directory -Force | Out-Null
+
+          Write-Host "✅ Shraga folder structure created at: $shragaPath" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "Folders created:" -ForegroundColor Yellow
+          Write-Host "  - $shragaPath\tasks\pending"
+          Write-Host "  - $shragaPath\tasks\in-progress"
+          Write-Host "  - $shragaPath\tasks\completed"
+          Write-Host "  - $shragaPath\workers"
+          Write-Host "  - $shragaPath\logs"
+
+          # Create a README file
+          $readmePath = Join-Path $shragaPath "README.md"
+          @"
+# Shraga Shared Folder
+
+This folder is used for file-based communication between Shraga orchestrator and workers.
+
+## Folder Structure
+
+- **tasks/pending/** - New tasks are placed here by the orchestrator
+- **tasks/in-progress/** - Tasks being processed by workers
+- **tasks/completed/** - Completed tasks with results
+- **workers/** - Worker heartbeat files
+- **logs/** - Execution logs
+
+## How It Works
+
+1. Orchestrator writes task JSON files to `tasks/pending/`
+2. Worker watches `tasks/pending/` folder
+3. Worker picks up task, moves to `in-progress/`
+4. Worker executes task with Claude Code
+5. Worker writes result to `completed/` folder
+6. OneDrive syncs everything automatically!
+
+Created: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+Dev Box: $env:COMPUTERNAME
+User: $env:USERNAME
+"@ | Out-File -FilePath $readmePath -Encoding UTF8
+
+          Write-Host "✅ README.md created" -ForegroundColor Green
+
+        } else {
+          Write-Host "⚠️  OneDrive - Microsoft folder not found!" -ForegroundColor Red
+          Write-Host "   Expected location: $oneDriveFolder" -ForegroundColor Yellow
+          Write-Host "   Please sign in to OneDrive and run this script again." -ForegroundColor Yellow
+          Write-Host ""
+          Write-Host "To sign in to OneDrive:" -ForegroundColor Cyan
+          Write-Host "   1. Click the OneDrive icon in the system tray" -ForegroundColor White
+          Write-Host "   2. Sign in with your Microsoft account" -ForegroundColor White
+          Write-Host "   3. Wait for initial sync to complete" -ForegroundColor White
+        }
+
+        Write-Host ""
+        Write-Host "=== Setup Complete ===" -ForegroundColor Cyan
+    timeout: 120
+
+  # Clone Shraga worker repository
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host "=== Cloning Shraga Worker Repository ===" -ForegroundColor Cyan
+
+        $repoPath = "C:\Dev\shraga-worker"
+        if (!(Test-Path $repoPath)) {
+          Write-Host "Cloning repository..." -ForegroundColor Yellow
+          git clone https://msazure.visualstudio.com/DefaultCollection/CCI/_git/Users --branch users/sagik/shraga-worker $repoPath 2>&1
+
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "✅ Repository cloned to: $repoPath" -ForegroundColor Green
+          } else {
+            Write-Host "⚠️  Failed to clone repository (exit code: $LASTEXITCODE)" -ForegroundColor Red
+            Write-Host "   You may need to authenticate or check repository access." -ForegroundColor Yellow
+          }
+        } else {
+          Write-Host "✅ Repository already exists at: $repoPath" -ForegroundColor Green
+        }
+    timeout: 300
+
+  # Verify installations
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host ""
+        Write-Host "=== Verifying Installations ===" -ForegroundColor Cyan
+        Write-Host ""
+
+        # Check Git
+        try {
+          $gitVersion = git --version
+          Write-Host "✅ Git: $gitVersion" -ForegroundColor Green
+        } catch {
+          Write-Host "❌ Git not found" -ForegroundColor Red
+        }
+
+        # Check Python
+        try {
+          $pythonVersion = python --version
+          Write-Host "✅ Python: $pythonVersion" -ForegroundColor Green
+        } catch {
+          Write-Host "❌ Python not found" -ForegroundColor Red
+        }
+
+        # Check Claude Code
+        try {
+          $claudeVersion = claude --version
+          Write-Host "✅ Claude Code: $claudeVersion" -ForegroundColor Green
+        } catch {
+          Write-Host "❌ Claude Code not found" -ForegroundColor Red
+          Write-Host "   You may need to restart your terminal or sign out/in" -ForegroundColor Yellow
+        }
+
+        # Check Python packages
+        Write-Host ""
+        Write-Host "Python packages:" -ForegroundColor Yellow
+        pip list | Select-String "requests|azure-identity|watchdog"
+
+        Write-Host ""
+        Write-Host "=== Next Steps ===" -ForegroundColor Cyan
+        Write-Host "1. Authenticate Claude Code: claude /login (device code flow)" -ForegroundColor White
+        Write-Host "2. Authenticate Azure CLI: az login (device code flow)" -ForegroundColor White
+        Write-Host "3. Worker will auto-start on next boot" -ForegroundColor White
+        Write-Host ""
+    timeout: 120
+
+  # Setup worker auto-start on boot
+  - name: powershell
+    parameters:
+      command: |
+        Write-Host ""
+        Write-Host "=== Configuring Worker Auto-Start ===" -ForegroundColor Cyan
+
+        $workerPath = "C:\Dev\shraga-worker\worker.py"
+        $taskName = "ShragaWorker"
+
+        # Create Task Scheduler task to run worker on startup
+        $action = New-ScheduledTaskAction -Execute "python.exe" -Argument "`"$workerPath`"" -WorkingDirectory "C:\Dev\shraga-worker"
+        $trigger = New-ScheduledTaskTrigger -AtStartup
+        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive -RunLevel Limited
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+
+        # Register task
+        try {
+          Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+          Write-Host "✅ Worker configured to auto-start on boot" -ForegroundColor Green
+          Write-Host "   Task name: $taskName" -ForegroundColor Gray
+        } catch {
+          Write-Host "⚠️  Failed to create scheduled task: $_" -ForegroundColor Red
+        }
+
+        Write-Host ""
+        Write-Host "=== Shraga Dev Box Ready ===" -ForegroundColor Cyan
+        Write-Host "Please authenticate Claude Code and Azure CLI to complete setup." -ForegroundColor Yellow
+        Write-Host ""
+    timeout: 60
