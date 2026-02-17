@@ -290,6 +290,11 @@ class DevBoxManager:
             result = response.json()
             print(f"Customization applied to {devbox_name}")
             return result
+        elif response.status_code == 409:
+            # Customization group already exists (e.g., re-applying to an
+            # already-customized box).  Treat as success.
+            print(f"Customization group already exists on {devbox_name}, skipping")
+            return {"status": "AlreadyExists", "name": "shraga-setup"}
         else:
             raise Exception(
                 f"Failed to apply customizations: {response.status_code} {response.text}"

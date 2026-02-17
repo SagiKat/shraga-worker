@@ -11,10 +11,14 @@ import time
 import os
 import sys
 import subprocess
+import uuid
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from azure.identity import DefaultAzureCredential, DeviceCodeCredential
 from azure.core.credentials import AccessToken
+
+# Unique instance ID for this process (helps distinguish multiple GM instances)
+INSTANCE_ID = uuid.uuid4().hex[:8]
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from orchestrator_devbox import DevBoxManager, DevBoxInfo
@@ -316,7 +320,7 @@ class GlobalManager:
             url = f"{DATAVERSE_API}/{CONVERSATIONS_TABLE}({row_id})"
             body = {
                 "cr_status": STATUS_CLAIMED,
-                "cr_claimed_by": self.manager_id,
+                "cr_claimed_by": f"{self.manager_id}:{INSTANCE_ID}",
             }
             resp = requests.patch(url, headers=headers, json=body, timeout=REQUEST_TIMEOUT)
             if resp.status_code == 412:
@@ -338,11 +342,12 @@ class GlobalManager:
                 json={"cr_status": STATUS_PROCESSED},
                 timeout=REQUEST_TIMEOUT,
             )
+            print(f"[DV] Marked {row_id[:8]} as Processed")
         except Exception as e:
             print(f"[WARN] mark_processed failed: {e}")
 
     def send_response(self, in_reply_to: str, mcs_conversation_id: str,
-                      user_email: str, text: str):
+                      user_email: str, text: str, followup_expected: bool = False):
         headers = self._headers(content_type="application/json")
         if not headers:
             return None
@@ -355,12 +360,14 @@ class GlobalManager:
                 "cr_direction": DIRECTION_OUTBOUND,
                 "cr_status": STATUS_UNCLAIMED,
                 "cr_in_reply_to": in_reply_to,
+                "cr_followup_expected": "true" if followup_expected else "",
             }
             url = f"{DATAVERSE_API}/{CONVERSATIONS_TABLE}"
             resp = requests.post(url, headers=headers, json=body, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
+            print(f"[DV] Wrote outbound response to {user_email} (reply_to={in_reply_to[:8]}): \"{text[:60]}...\"")
             if resp.status_code == 204 or not resp.content:
-                return True  # Success but no body (Dataverse returns 204 No Content)
+                return True
             return resp.json()
         except Exception as e:
             print(f"[ERROR] send_response: {e}")
@@ -397,6 +404,7 @@ class GlobalManager:
                 "In the meantime, please try again in a minute."
             )
 
+        print(f"[PROCESS] Finished processing {row_id[:8]}. Sending response ({len(response)} chars)...")
         self.send_response(
             in_reply_to=row_id,
             mcs_conversation_id=mcs_conv_id,
@@ -404,6 +412,7 @@ class GlobalManager:
             text=response,
         )
         self.mark_processed(row_id)
+        print(f"[PROCESS] Done with {row_id[:8]}")
 
     def _call_claude(self, user_text: str, system_prompt: str) -> str | None:
         """Low-level Claude CLI call. Returns response text or None on failure."""
@@ -546,8 +555,7 @@ class GlobalManager:
                     # Persist to Dataverse
                     self._update_user_state(
                         user_email,
-                        crb3b_onboardingstep="customizing",
-                        crb3b_connectionurl=info.connection_url,
+                        crb3b_onboardingstep="waiting_provisioning",
                     )
 
                     # Apply customizations (Git, Claude Code, Python)
@@ -669,48 +677,126 @@ class GlobalManager:
                     crb3b_onboardingstep="auth_pending",
                 )
 
-        # ── Step 3: Send RDP link for auth on the dev box ──────────
+        # ── Step 3: Device code auth ────────────────────────────────
         #
-        # IMPORTANT: Claude Code must be authenticated on the TARGET DEV
-        # BOX, not on the Global Manager's machine.  Instead of running
-        # ``claude /login`` locally we send the user the web RDP URL so
-        # they can open a browser-based session to the dev box and run
-        # ``claude /login`` there.
+        # Primary: initiate device code flow and send the URL+code to the
+        # user via a follow-up message in Teams.
+        # Fallback: if device code fails, send RDP link instead.
         #
         onboarding_step = state.get("onboarding_step", "")
 
-        if not state.get("auth_complete") and onboarding_step != "auth_pending_rdp":
-            connection_url = state.get(
-                "connection_url",
-                f"https://devbox.microsoft.com/connect?devbox={devbox_name}",
+        if not state.get("auth_complete") and onboarding_step not in ("auth_device_code_sent", "auth_pending_rdp"):
+            # Send initial message with follow-up flag so MCS loops back
+            self.send_response(
+                in_reply_to=row_id,
+                mcs_conversation_id=mcs_conv_id,
+                user_email=user_email,
+                text="I need to authenticate your session. One moment — I'll send you a link...",
+                followup_expected=True,
             )
 
-            # Build the setup instructions using RemoteDevBoxAuth
-            remote_auth = RemoteDevBoxAuth(connection_url=connection_url)
-            auth_message = remote_auth.build_auth_message(connection_url)
+            # Start device code auth
+            try:
+                device_code_info = {}
 
-            state["onboarding_step"] = "auth_pending_rdp"
-            self._onboarding_state[user_email] = state
+                def _device_code_callback(verification_uri, user_code, expires_on):
+                    device_code_info["uri"] = verification_uri
+                    device_code_info["code"] = user_code
+                    print(f"[AUTH] Device code ready: {verification_uri} code={user_code}")
 
-            # Persist to Dataverse
-            self._update_user_state(
-                user_email,
-                crb3b_onboardingstep="auth_pending",
-                crb3b_connectionurl=connection_url,
-            )
+                    # Send the code as the follow-up message
+                    auth_prompt = (
+                        f"The user needs to authenticate. They should open {verification_uri} "
+                        f"and enter the code {user_code}. Tell them clearly and concisely."
+                    )
+                    auth_msg = self._call_claude(auth_prompt, onboarding_system_prompt)
+                    if not auth_msg:
+                        auth_msg = (
+                            f"Please authenticate by opening this link:\n"
+                            f"{verification_uri}\n\n"
+                            f"Enter code: **{user_code}**\n\n"
+                            f"Once done, reply here and I'll verify."
+                        )
 
-            return auth_message
+                    self.send_response(
+                        in_reply_to=row_id,
+                        mcs_conversation_id=mcs_conv_id,
+                        user_email=user_email,
+                        text=auth_msg,
+                    )
 
-        # ── Step 4: User confirms auth is done ─────────────────────
+                user_credential = DeviceCodeCredential(
+                    tenant_id=MS_TENANT_ID,
+                    prompt_callback=lambda uri, code, expires: _device_code_callback(uri, code, expires),
+                    timeout=300,
+                )
+
+                # This blocks until the user authenticates or timeout
+                print(f"[AUTH] Waiting for user {user_email} to authenticate via device code...")
+                token = user_credential.get_token(f"{DATAVERSE_URL}/.default")
+                print(f"[AUTH] User {user_email} authenticated successfully!")
+
+                state["auth_complete"] = True
+                state["onboarding_step"] = "auth_device_code_sent"
+                self._onboarding_state[user_email] = state
+
+                self._update_user_state(
+                    user_email,
+                    crb3b_onboardingstep="completed",
+                    crb3b_claudeauthstatus="Authenticated",
+                )
+
+                self._known_users.add(user_email)
+
+                done_prompt = (
+                    f"The user ({user_email}) has successfully authenticated. "
+                    f"Their dev box ({devbox_name}) is ready. Tell them their "
+                    f"personal assistant is now active and they can start creating tasks."
+                )
+                done_msg = self._call_claude(done_prompt, onboarding_system_prompt)
+                if not done_msg:
+                    done_msg = (
+                        f"Authentication complete! Your dev box ({devbox_name}) is ready "
+                        f"and your personal assistant is active. You can start creating tasks now!"
+                    )
+
+                self._onboarding_state.pop(user_email, None)
+                return done_msg
+
+            except Exception as auth_err:
+                print(f"[AUTH] Device code auth failed for {user_email}: {auth_err}")
+
+                # Fallback to RDP link
+                connection_url = state.get(
+                    "connection_url",
+                    f"https://devbox.microsoft.com/connect?devbox={devbox_name}",
+                )
+                state["onboarding_step"] = "auth_pending_rdp"
+                self._onboarding_state[user_email] = state
+                self._update_user_state(
+                    user_email,
+                    crb3b_onboardingstep="auth_pending",
+                )
+
+                remote_auth = RemoteDevBoxAuth(connection_url=connection_url)
+                return remote_auth.build_auth_message(connection_url)
+
+        # ── Step 4: User confirms auth is done (RDP fallback path) ──
         if not state.get("auth_complete"):
-            # Check if the user said "done" (or similar confirmation)
-            user_lower = user_text.lower().strip()
-            if user_lower in ("done", "yes", "completed", "finished", "ready", "ok"):
+            # Use Claude to understand if the user is confirming completion
+            check_prompt = (
+                f"The user ({user_email}) was asked to authenticate on their dev box "
+                f"({devbox_name}) via an RDP link. They just replied: \"{user_text}\"\n\n"
+                f"Did they confirm they completed the setup? Respond with ONLY 'YES' or 'NO'."
+            )
+            check_result = self._call_claude(check_prompt, "You are a classification assistant. Respond with only YES or NO.")
+            user_confirmed = check_result and "YES" in check_result.upper()
+
+            if user_confirmed:
                 state["auth_complete"] = True
                 self._onboarding_state[user_email] = state
                 self._known_users.add(user_email)
 
-                # Persist completed state to Dataverse
                 self._update_user_state(
                     user_email,
                     crb3b_onboardingstep="completed",
@@ -723,29 +809,22 @@ class GlobalManager:
                 )
                 done_msg = self._call_claude(done_prompt, onboarding_system_prompt)
                 if not done_msg:
-                    done_msg = (
-                        f"Setup complete! Your personal assistant is ready. "
-                        f"You can now create and manage coding tasks. Just tell me "
-                        f"what you need!"
-                    )
+                    done_msg = "Setup complete! Your personal assistant is ready."
 
-                # Clean up in-memory onboarding state (DV retains the record)
                 self._onboarding_state.pop(user_email, None)
-
                 return done_msg
             else:
-                # User sent something else -- remind them
-                connection_url = state.get(
-                    "connection_url",
-                    f"https://devbox.microsoft.com/connect?devbox={devbox_name}",
+                # User sent something else — use Claude to respond contextually
+                remind_prompt = (
+                    f"The user ({user_email}) has a dev box ({devbox_name}) but hasn't "
+                    f"completed authentication yet. They said: \"{user_text}\"\n"
+                    f"Remind them they need to complete the authentication step. "
+                    f"Be helpful and concise."
                 )
-                return (
-                    f"I'm waiting for you to complete setup on your dev box.\n\n"
-                    f"Please open this link: {connection_url}\n"
-                    f"In the browser session, open PowerShell and run: claude /login\n\n"
-                    f"Once you have completed authentication and setup, reply with "
-                    f"**done**."
-                )
+                remind_msg = self._call_claude(remind_prompt, onboarding_system_prompt)
+                if not remind_msg:
+                    remind_msg = "I'm still waiting for you to complete the authentication step on your dev box."
+                return remind_msg
 
         # ── Fallback ────────────────────────────────────────────────
         return (
@@ -757,7 +836,10 @@ class GlobalManager:
     # ── Main Loop ─────────────────────────────────────────────────────
 
     def run(self):
-        print(f"[START] Global Manager (fallback)")
+        if sys.platform == "win32":
+            sys.stdout.reconfigure(encoding='utf-8')
+            sys.stderr.reconfigure(encoding='utf-8')
+        print(f"[START] Global Manager (fallback) | instance={INSTANCE_ID} | pid={os.getpid()}")
         print(f"[CONFIG] Dataverse: {DATAVERSE_URL}")
         print(f"[CONFIG] Users table: {USERS_TABLE}")
         print(f"[CONFIG] Claim delay: {CLAIM_DELAY}s")
@@ -766,8 +848,15 @@ class GlobalManager:
         while True:
             try:
                 messages = self.poll_stale_unclaimed()
+                if messages:
+                    print(f"[POLL] Found {len(messages)} unclaimed message(s)")
                 for msg in messages:
+                    row_id = msg.get("cr_shraga_conversationid", "?")[:8]
+                    user_email = msg.get("cr_useremail", "?")
+                    user_text = (msg.get("cr_message", "") or "")[:50]
+                    print(f"[CLAIM] Attempting to claim {row_id} from {user_email}: \"{user_text}\"")
                     if self.claim_message(msg):
+                        print(f"[CLAIM] Claimed {row_id} successfully")
                         try:
                             self.process_message(msg)
                         except Exception as e:

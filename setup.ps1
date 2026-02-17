@@ -14,6 +14,20 @@ $DevCenterEndpoint = "https://72f988bf-86f1-41af-91ab-2d7cd011db47-devcenter-4l2
 $Project = "PVA"
 $Pool = "botdesigner-pool-italynorth"
 $ApiVersion = "2024-05-01-preview"
+$CustomApiVersion = "2025-04-01-preview"
+
+# Pre-check: az CLI must be installed
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+    Write-Host "  Azure CLI (az) is required but not installed." -ForegroundColor Red
+    Write-Host "  Install from: https://aka.ms/installazurecli" -ForegroundColor Yellow
+    exit 1
+}
+
+# Helper: get fresh token
+function Get-DevCenterToken {
+    $t = az account get-access-token --resource "https://devcenter.azure.com" --query "accessToken" -o tsv
+    return @{ "Authorization" = "Bearer $t"; "User-Agent" = "Shraga-Setup/1.0" }
+}
 
 # Step 1: Authenticate
 Write-Host "[1/6] Authenticating..." -ForegroundColor Yellow
@@ -23,64 +37,56 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "  Authentication failed. Please try again." -ForegroundColor Red
     exit 1
 }
-
 $userEmail = az account show --query "user.name" -o tsv
-$userOid = az ad signed-in-user show --query "id" -o tsv
 Write-Host "  Signed in as: $userEmail" -ForegroundColor Green
 
-# Step 2: Determine dev box name (shraga-box-01, 02, 03...)
+# Step 2: Find next available dev box name (shraga-box-01, 02, 03...)
 Write-Host ""
-Write-Host "[2/6] Finding next available dev box name..." -ForegroundColor Yellow
-$token = az account get-access-token --resource "https://devcenter.azure.com" --query "accessToken" -o tsv
-$headers = @{ "Authorization" = "Bearer $token"; "User-Agent" = "Shraga-Setup/1.0" }
-
-$existingBoxes = (Invoke-RestMethod -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes`?api-version=$ApiVersion" -Headers $headers).value
-$shragaBoxes = $existingBoxes | Where-Object { $_.name -match "^shraga-box-\d+$" }
-$usedNumbers = $shragaBoxes | ForEach-Object { [int]($_.name -replace "shraga-box-", "") }
+Write-Host "[2/6] Finding next available dev box..." -ForegroundColor Yellow
+$headers = Get-DevCenterToken
+$existingBoxes = (Invoke-RestMethod -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes?api-version=$ApiVersion" -Headers $headers).value
+$shragaBoxes = @($existingBoxes | Where-Object { $_.name -match "^shraga-box-\d+$" })
+$usedNumbers = @($shragaBoxes | ForEach-Object { [int]($_.name -replace "shraga-box-", "") })
 
 $nextNum = 1
 while ($usedNumbers -contains $nextNum) { $nextNum++ }
 $DevBoxName = "shraga-box-{0:D2}" -f $nextNum
 
 Write-Host "  Existing shraga boxes: $($shragaBoxes.Count)" -ForegroundColor Gray
-Write-Host "  New dev box: $DevBoxName" -ForegroundColor Green
+Write-Host "  Creating: $DevBoxName" -ForegroundColor Green
 
-$skip_provision = $false
-
-if (-not $skip_provision) {
-    # Create dev box
-    $body = @{ poolName = $Pool } | ConvertTo-Json
-    try {
-        Invoke-RestMethod -Method Put -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName`?api-version=$ApiVersion" `
-            -Headers ($headers + @{ "Content-Type" = "application/json" }) -Body $body | Out-Null
-        Write-Host "  Provisioning started!" -ForegroundColor Green
-    } catch {
-        Write-Host "  Failed to create dev box: $_" -ForegroundColor Red
-        exit 1
-    }
-
-    # Wait for provisioning
-    Write-Host "  Waiting for provisioning (this takes ~25 min)..." -ForegroundColor Gray
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($true) {
-        Start-Sleep -Seconds 30
-        $token = az account get-access-token --resource "https://devcenter.azure.com" --query "accessToken" -o tsv
-        $headers = @{ "Authorization" = "Bearer $token"; "User-Agent" = "Shraga-Setup/1.0" }
-        $status = Invoke-RestMethod -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName`?api-version=$ApiVersion" -Headers $headers
-        $state = $status.provisioningState
-        $elapsed = $sw.Elapsed.ToString("mm\:ss")
-        Write-Host "  [$elapsed] $state" -ForegroundColor Gray
-        if ($state -eq "Succeeded") { Write-Host "  Provisioned!" -ForegroundColor Green; break }
-        if ($state -eq "Failed") { Write-Host "  Provisioning failed." -ForegroundColor Red; exit 1 }
-    }
+# Step 3: Provision dev box
+Write-Host ""
+Write-Host "[3/6] Provisioning dev box..." -ForegroundColor Yellow
+$headers = Get-DevCenterToken
+$body = @{ poolName = $Pool } | ConvertTo-Json
+try {
+    Invoke-RestMethod -Method Put `
+        -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName`?api-version=$ApiVersion" `
+        -Headers ($headers + @{ "Content-Type" = "application/json" }) -Body $body | Out-Null
+    Write-Host "  Provisioning started" -ForegroundColor Green
+} catch {
+    Write-Host "  Failed: $_" -ForegroundColor Red
+    exit 1
 }
 
-# Step 3: Apply customizations (tools)
-Write-Host ""
-Write-Host "[3/6] Installing tools (Git, Claude Code, Python)..." -ForegroundColor Yellow
-$token = az account get-access-token --resource "https://devcenter.azure.com" --query "accessToken" -o tsv
-$headers = @{ "Authorization" = "Bearer $token"; "Content-Type" = "application/json"; "User-Agent" = "Shraga-Setup/1.0" }
+Write-Host "  This takes ~25 minutes. Progress:" -ForegroundColor Gray
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+while ($true) {
+    Start-Sleep -Seconds 30
+    $headers = Get-DevCenterToken
+    $status = Invoke-RestMethod -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName`?api-version=$ApiVersion" -Headers $headers
+    $state = $status.provisioningState
+    $elapsed = $sw.Elapsed.ToString("mm\:ss")
+    Write-Host "  [$elapsed] $state" -ForegroundColor Gray
+    if ($state -eq "Succeeded") { Write-Host "  Done!" -ForegroundColor Green; break }
+    if ($state -eq "Failed") { Write-Host "  Provisioning failed." -ForegroundColor Red; exit 1 }
+}
 
+# Step 4: Install tools (customization group 1)
+Write-Host ""
+Write-Host "[4/6] Installing tools (Git, Claude Code, Python)..." -ForegroundColor Yellow
+$headers = Get-DevCenterToken
 $toolsBody = @{
     tasks = @(
         @{ name = "DevBox.Catalog/winget"; parameters = @{ package = "Git.Git" } },
@@ -90,52 +96,65 @@ $toolsBody = @{
 } | ConvertTo-Json -Depth 3
 
 try {
-    Invoke-RestMethod -Method Put -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName/customizationGroups/shraga-tools`?api-version=2025-04-01-preview" `
-        -Headers $headers -Body $toolsBody | Out-Null
-    Write-Host "  Tools installation started" -ForegroundColor Green
+    Invoke-RestMethod -Method Put `
+        -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName/customizationGroups/shraga-tools?api-version=$CustomApiVersion" `
+        -Headers ($headers + @{ "Content-Type" = "application/json" }) -Body $toolsBody | Out-Null
+    Write-Host "  Started" -ForegroundColor Green
 } catch {
-    if ($_.Exception.Response.StatusCode -eq 409) {
-        Write-Host "  Tools already installed" -ForegroundColor Green
-    } else {
-        Write-Host "  Warning: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
+    if ($_.Exception.Response.StatusCode.value__ -eq 409) { Write-Host "  Already done" -ForegroundColor Green }
+    else { Write-Host "  Warning: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 
-# Wait for tools
-Write-Host "  Waiting for tools installation (~3-5 min)..." -ForegroundColor Gray
+Write-Host "  Waiting (~3-5 min)..." -ForegroundColor Gray
 while ($true) {
     Start-Sleep -Seconds 15
-    $token = az account get-access-token --resource "https://devcenter.azure.com" --query "accessToken" -o tsv
-    $headers = @{ "Authorization" = "Bearer $token"; "User-Agent" = "Shraga-Setup/1.0" }
     try {
-        $cust = Invoke-RestMethod -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName/customizationGroups/shraga-tools`?api-version=2025-04-01-preview" -Headers $headers
-        if ($cust.status -eq "Succeeded" -or $cust.status -eq "Failed") {
-            Write-Host "  Tools: $($cust.status)" -ForegroundColor $(if ($cust.status -eq "Succeeded") { "Green" } else { "Yellow" })
-            break
-        }
+        $headers = Get-DevCenterToken
+        $cust = Invoke-RestMethod -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName/customizationGroups/shraga-tools?api-version=$CustomApiVersion" -Headers $headers
+        $s = $cust.status
+        if ($s -eq "Succeeded" -or $s -eq "Failed") { Write-Host "  Tools: $s" -ForegroundColor $(if ($s -eq "Succeeded") {"Green"} else {"Yellow"}); break }
+        if ($s -ne "NotStarted") { Write-Host "  [$s]" -NoNewline -ForegroundColor Gray }
     } catch { }
 }
 
-# Step 4: Deploy code + keep-alive + worker
+# Step 5: Deploy code + keep-alive + auth shortcut (customization group 2)
 Write-Host ""
-Write-Host "[4/6] Deploying code and configuring worker..." -ForegroundColor Yellow
-$token = az account get-access-token --resource "https://devcenter.azure.com" --query "accessToken" -o tsv
-$headers = @{ "Authorization" = "Bearer $token"; "Content-Type" = "application/json"; "User-Agent" = "Shraga-Setup/1.0" }
+Write-Host "[5/6] Deploying code and worker..." -ForegroundColor Yellow
+$headers = Get-DevCenterToken
 
-$deployCmd = @"
-powercfg /change monitor-timeout-ac 0; powercfg /change standby-timeout-ac 0; powercfg /change hibernate-timeout-ac 0; powercfg /change disk-timeout-ac 0; powercfg /hibernate off; reg add 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' /v fResetBroken /t REG_DWORD /d 0 /f; & 'C:\Program Files\Git\cmd\git.exe' clone --single-branch --depth 1 https://github.com/SagiKat/shraga-worker.git 'C:\Dev\shraga-worker'; & 'C:\Python312\python.exe' -m pip install requests azure-identity azure-core watchdog; `$action = New-ScheduledTaskAction -Execute 'C:\Python312\python.exe' -Argument 'C:\Dev\shraga-worker\integrated_task_worker.py' -WorkingDirectory 'C:\Dev\shraga-worker'; `$trigger = New-ScheduledTaskTrigger -AtStartup; Register-ScheduledTask -TaskName 'ShragaWorker' -Action `$action -Trigger `$trigger -User 'SYSTEM' -RunLevel Highest -Force; Set-Content -Path 'C:\Users\Public\Desktop\Shraga-Authenticate.ps1' -Value @'
-Write-Host '=== Shraga Authentication ===' -ForegroundColor Cyan
-Write-Host ''
-Write-Host 'Step 1: Azure login...' -ForegroundColor Yellow
-az login
-Write-Host ''
-Write-Host 'Step 2: Claude Code login...' -ForegroundColor Yellow
-claude /login
-Write-Host ''
-Write-Host 'All done! You can close this window.' -ForegroundColor Green
-Read-Host 'Press Enter to close'
-'@; `$ws = New-Object -ComObject WScript.Shell; `$sc = `$ws.CreateShortcut('C:\Users\Public\Desktop\Shraga - Click to Authenticate.lnk'); `$sc.TargetPath = 'powershell.exe'; `$sc.Arguments = '-ExecutionPolicy Bypass -File C:\Users\Public\Desktop\Shraga-Authenticate.ps1'; `$sc.Save()
-"@
+$deployCmd = "Write-Output 'Keep-alive...'; " +
+    "powercfg /change monitor-timeout-ac 0; powercfg /change standby-timeout-ac 0; " +
+    "powercfg /change hibernate-timeout-ac 0; powercfg /change disk-timeout-ac 0; " +
+    "powercfg /hibernate off; " +
+    "reg add 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' /v fResetBroken /t REG_DWORD /d 0 /f; " +
+    "Write-Output 'Cloning repo...'; " +
+    "& 'C:\Program Files\Git\cmd\git.exe' clone --single-branch --depth 1 https://github.com/SagiKat/shraga-worker.git 'C:\Dev\shraga-worker'; " +
+    "Write-Output 'Installing packages...'; " +
+    "& 'C:\Python312\python.exe' -m pip install requests azure-identity azure-core watchdog; " +
+    "Write-Output 'Registering worker...'; " +
+    "`$action = New-ScheduledTaskAction -Execute 'C:\Python312\python.exe' -Argument 'C:\Dev\shraga-worker\integrated_task_worker.py' -WorkingDirectory 'C:\Dev\shraga-worker'; " +
+    "`$trigger = New-ScheduledTaskTrigger -AtStartup; " +
+    "Register-ScheduledTask -TaskName 'ShragaWorker' -Action `$action -Trigger `$trigger -User 'SYSTEM' -RunLevel Highest -Force; " +
+    "Write-Output 'Creating auth shortcut...'; " +
+    "Set-Content -Path 'C:\Users\Public\Desktop\Shraga-Authenticate.ps1' -Value @'" + "`n" +
+    "Write-Host ''`n" +
+    "Write-Host '=== Shraga Authentication ===' -ForegroundColor Cyan`n" +
+    "Write-Host ''`n" +
+    "Write-Host 'Step 1: Azure login...' -ForegroundColor Yellow`n" +
+    "az login`n" +
+    "Write-Host ''`n" +
+    "Write-Host 'Step 2: Claude Code login...' -ForegroundColor Yellow`n" +
+    "claude /login`n" +
+    "Write-Host ''`n" +
+    "Write-Host 'All done! You can close this window.' -ForegroundColor Green`n" +
+    "Read-Host 'Press Enter to close'`n" +
+    "'@; " +
+    "`$ws = New-Object -ComObject WScript.Shell; " +
+    "`$sc = `$ws.CreateShortcut('C:\Users\Public\Desktop\Shraga - Click to Authenticate.lnk'); " +
+    "`$sc.TargetPath = 'powershell.exe'; " +
+    "`$sc.Arguments = '-ExecutionPolicy Bypass -File C:\Users\Public\Desktop\Shraga-Authenticate.ps1'; " +
+    "`$sc.Save(); " +
+    "Write-Output 'Done'"
 
 $deployBody = @{
     tasks = @(
@@ -144,54 +163,41 @@ $deployBody = @{
 } | ConvertTo-Json -Depth 3
 
 try {
-    Invoke-RestMethod -Method Put -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName/customizationGroups/shraga-deploy`?api-version=2025-04-01-preview" `
-        -Headers $headers -Body $deployBody | Out-Null
-    Write-Host "  Deployment started" -ForegroundColor Green
+    Invoke-RestMethod -Method Put `
+        -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName/customizationGroups/shraga-deploy?api-version=$CustomApiVersion" `
+        -Headers ($headers + @{ "Content-Type" = "application/json" }) -Body $deployBody | Out-Null
+    Write-Host "  Started" -ForegroundColor Green
 } catch {
-    if ($_.Exception.Response.StatusCode -eq 409) {
-        Write-Host "  Already deployed" -ForegroundColor Green
-    } else {
-        Write-Host "  Warning: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
+    if ($_.Exception.Response.StatusCode.value__ -eq 409) { Write-Host "  Already done" -ForegroundColor Green }
+    else { Write-Host "  Warning: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 
-# Wait for deploy
-Write-Host "  Waiting for deployment (~1 min)..." -ForegroundColor Gray
+Write-Host "  Waiting (~1-2 min)..." -ForegroundColor Gray
 while ($true) {
     Start-Sleep -Seconds 10
-    $token = az account get-access-token --resource "https://devcenter.azure.com" --query "accessToken" -o tsv
-    $headers = @{ "Authorization" = "Bearer $token"; "User-Agent" = "Shraga-Setup/1.0" }
     try {
-        $cust = Invoke-RestMethod -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName/customizationGroups/shraga-deploy`?api-version=2025-04-01-preview" -Headers $headers
-        if ($cust.status -eq "Succeeded" -or $cust.status -eq "Failed") {
-            Write-Host "  Deploy: $($cust.status)" -ForegroundColor $(if ($cust.status -eq "Succeeded") { "Green" } else { "Yellow" })
-            break
-        }
+        $headers = Get-DevCenterToken
+        $cust = Invoke-RestMethod -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName/customizationGroups/shraga-deploy?api-version=$CustomApiVersion" -Headers $headers
+        $s = $cust.status
+        if ($s -eq "Succeeded" -or $s -eq "Failed") { Write-Host "  Deploy: $s" -ForegroundColor $(if ($s -eq "Succeeded") {"Green"} else {"Yellow"}); break }
+        if ($s -ne "NotStarted") { Write-Host "  [$s]" -NoNewline -ForegroundColor Gray }
     } catch { }
 }
 
-# Step 5: Get RDP URL
+# Step 6: Show connection info
 Write-Host ""
-Write-Host "[5/6] Getting connection info..." -ForegroundColor Yellow
-$token = az account get-access-token --resource "https://devcenter.azure.com" --query "accessToken" -o tsv
-$headers = @{ "Authorization" = "Bearer $token"; "User-Agent" = "Shraga-Setup/1.0" }
-$conn = Invoke-RestMethod -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName/remoteConnection`?api-version=2024-05-01-preview" -Headers $headers
+Write-Host "[6/6] Getting connection info..." -ForegroundColor Yellow
+$headers = Get-DevCenterToken
+$conn = Invoke-RestMethod -Uri "$DevCenterEndpoint/projects/$Project/users/me/devboxes/$DevBoxName/remoteConnection?api-version=$ApiVersion" -Headers $headers
 $webUrl = $conn.webUrl
-Write-Host "  Web RDP: $webUrl" -ForegroundColor Green
 
-# Step 6: Final step
 Write-Host ""
-Write-Host "[6/6] Almost done!" -ForegroundColor Yellow
+Write-Host "========================================" -ForegroundColor Green
+Write-Host "  Your dev box is ready: $DevBoxName" -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "  Your dev box is ready. One last step:" -ForegroundColor White
+Write-Host "  Final step — authenticate on the dev box:" -ForegroundColor White
 Write-Host ""
-Write-Host "  1. Open this link:" -ForegroundColor White
-Write-Host "     $webUrl" -ForegroundColor Cyan
-Write-Host ""
+Write-Host "  1. Open: $webUrl" -ForegroundColor Cyan
 Write-Host '  2. Double-click "Shraga - Click to Authenticate" on the desktop' -ForegroundColor White
-Write-Host "     (it will open two browser sign-in windows — just sign in)" -ForegroundColor Gray
 Write-Host ""
-Write-Host "================================" -ForegroundColor Green
-Write-Host "  Dev box: $DevBoxName" -ForegroundColor Green
-Write-Host "  Status: Ready" -ForegroundColor Green
-Write-Host "================================" -ForegroundColor Green

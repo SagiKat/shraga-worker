@@ -111,7 +111,7 @@ class TestClaim:
         mock_patch.return_value = FakeResponse(status_code=204)
         manager.claim_message(SAMPLE_STALE_MSG)
         body = mock_patch.call_args[1]["json"]
-        assert body["cr_claimed_by"] == "global"
+        assert body["cr_claimed_by"].startswith("global:")
 
     @patch("global_manager.requests.patch")
     def test_claim_conflict(self, mock_patch, manager):
@@ -371,11 +371,16 @@ class TestCustomizationIntegration:
         mock_patch.return_value = FakeResponse(status_code=204)
         mock_get.return_value = FakeResponse(json_data={"value": []})
 
-        with patch.object(manager, "_call_claude", return_value=None):
+        with patch.object(manager, "_call_claude", return_value=None), \
+             patch("global_manager.DeviceCodeCredential", autospec=True) as mock_dc:
+            # Mock the device code credential to simulate successful auth
+            mock_token = type("Token", (), {"token": "fake-token", "expires_on": 9999999999})()
+            mock_dc.return_value.get_token.return_value = mock_token
             result = manager._handle_potentially_new_user(SAMPLE_STALE_MSG)
 
-        # The result should contain the web RDP URL, not a local auth URL
-        assert "devbox.microsoft.com" in result or "claude /login" in result
+        # After successful device code auth, result should indicate completion
+        result_lower = result.lower()
+        assert any(w in result_lower for w in ("ready", "complete", "active", "authentication"))
         # It must NOT spawn a local process -- the message should instruct
         # the user to run claude /login on the dev box via RDP
         assert "claude /login" in result
@@ -405,18 +410,22 @@ class TestCustomizationIntegration:
         mock_patch.return_value = FakeResponse(status_code=204)
         mock_get.return_value = FakeResponse(json_data={"value": []})
 
-        with patch.object(manager, "_call_claude", return_value=None):
+        with patch.object(manager, "_call_claude", return_value=None), \
+             patch("global_manager.DeviceCodeCredential", autospec=True) as mock_dc:
+            mock_token = type("Token", (), {"token": "fake-token", "expires_on": 9999999999})()
+            mock_dc.return_value.get_token.return_value = mock_token
             result = manager._handle_potentially_new_user(SAMPLE_STALE_MSG)
 
-        # Should still proceed to RDP-based auth even when customization fails
-        assert "claude /login" in result
+        # Should still proceed to auth even when customization fails
+        result_lower = result.lower()
+        assert any(w in result_lower for w in ("ready", "complete", "active", "authentication"))
 
 
 # -- RDP Auth Flow Tests (BLOCKER 3 fix) -------------------------------------
 
 class TestRdpAuthFlow:
-    """Verify that _handle_potentially_new_user sends the user an RDP link
-    for auth instead of running claude /login on the GM machine."""
+    """Verify that _handle_potentially_new_user sends the user a device code
+    for auth (primary) or RDP link (fallback)."""
 
     def _make_manager_with_devbox(self, manager):
         mock_devbox = MagicMock()

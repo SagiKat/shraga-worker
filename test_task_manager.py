@@ -159,7 +159,7 @@ class TestClaim:
         manager.claim_message(SAMPLE_INBOUND_MSG)
         body = mock_patch.call_args[1]["json"]
         assert body["cr_status"] == "Claimed"
-        assert body["cr_claimed_by"] == "personal:testuser@example.com"
+        assert body["cr_claimed_by"].startswith("personal:testuser@example.com:")
 
     @patch("task_manager.requests.patch")
     def test_claim_uses_etag(self, mock_patch, manager):

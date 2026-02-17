@@ -13,6 +13,10 @@ import sys
 import subprocess
 import platform
 import threading
+import uuid
+
+# Unique instance ID for this process
+INSTANCE_ID = uuid.uuid4().hex[:8]
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from azure.identity import DefaultAzureCredential
@@ -191,7 +195,10 @@ class TaskManager:
             )
             resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
-            return resp.json().get("value", [])
+            messages = resp.json().get("value", [])
+            if messages:
+                print(f"[POLL] Found {len(messages)} unclaimed message(s) for {self.user_email}")
+            return messages
         except requests.exceptions.Timeout:
             print("[WARN] poll_unclaimed timed out")
             return []
@@ -218,7 +225,7 @@ class TaskManager:
             url = f"{DATAVERSE_API}/{CONVERSATIONS_TABLE}({row_id})"
             body = {
                 "cr_status": STATUS_CLAIMED,
-                "cr_claimed_by": self.manager_id,
+                "cr_claimed_by": f"{self.manager_id}:{INSTANCE_ID}",
             }
             resp = requests.patch(url, headers=headers, json=body, timeout=REQUEST_TIMEOUT)
             if resp.status_code == 412:
@@ -226,6 +233,7 @@ class TaskManager:
                 print(f"[INFO] Message {row_id} already claimed by another manager")
                 return False
             resp.raise_for_status()
+            print(f"[CLAIM] Claimed {row_id[:8]} successfully")
             return True
         except requests.exceptions.Timeout:
             print(f"[WARN] claim_message timed out for {row_id}")
@@ -246,6 +254,7 @@ class TaskManager:
                 json={"cr_status": STATUS_PROCESSED},
                 timeout=REQUEST_TIMEOUT,
             )
+            print(f"[DV] Marked {row_id[:8]} as Processed")
         except Exception as e:
             print(f"[WARN] mark_processed failed: {e}")
 
@@ -270,6 +279,7 @@ class TaskManager:
             url = f"{DATAVERSE_API}/{CONVERSATIONS_TABLE}"
             resp = requests.post(url, headers=headers, json=body, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
+            print(f"[DV] Wrote outbound response (reply_to={in_reply_to[:8]}): \"{text[:60]}...\"")
             if resp.status_code == 204:
                 return {"cr_shraga_conversationid": "created"}
             return resp.json()
@@ -867,7 +877,7 @@ Keep responses concise and conversational. Be friendly but professional."""
 
     def run(self):
         """Main polling loop."""
-        print(f"[START] Personal Task Manager for {self.user_email}")
+        print(f"[START] Personal Task Manager for {self.user_email} | instance={INSTANCE_ID} | pid={os.getpid()}")
         print(f"[CONFIG] Dataverse: {DATAVERSE_URL}")
         print(f"[CONFIG] Poll interval: {POLL_INTERVAL}s")
 
