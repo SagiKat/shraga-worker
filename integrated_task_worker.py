@@ -1419,28 +1419,6 @@ Full transcript saved in Dataverse (Task ID: {task_id})"""
 
             return False
 
-    def _enable_keep_alive(self):
-        """Prevent the dev box from sleeping/hibernating while the worker is running.
-
-        Uses SetThreadExecutionState on Windows to tell the OS the system is in use.
-        This prevents OS-level sleep but NOT the DevCenter platform-level stopOnDisconnect
-        action (which requires powercfg + fResetBroken registry settings via customization).
-        """
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                ES_CONTINUOUS = 0x80000000
-                ES_SYSTEM_REQUIRED = 0x00000001
-                result = ctypes.windll.kernel32.SetThreadExecutionState(
-                    ES_CONTINUOUS | ES_SYSTEM_REQUIRED
-                )
-                if result:
-                    print("[KEEP-ALIVE] OS sleep prevention enabled")
-                else:
-                    print("[KEEP-ALIVE] Warning: SetThreadExecutionState returned 0")
-            except Exception as e:
-                print(f"[KEEP-ALIVE] Warning: Could not set execution state: {e}")
-
     def run(self):
         """Main worker loop"""
         if sys.platform == "win32":
@@ -1462,9 +1440,6 @@ Full transcript saved in Dataverse (Task ID: {task_id})"""
             if not self.get_current_user():
                 print("[FATAL] Could not identify user")
                 return
-
-        # Enable keep-alive to prevent dev box from sleeping
-        self._enable_keep_alive()
 
         print(f"Worker started for user: {self.current_user_id}")
         print(f"Current version: {self.current_version}")
