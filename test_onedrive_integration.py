@@ -313,7 +313,6 @@ class TestSetupProjectWithCustomPath:
         assert folder.exists()
         # The standard project files should be created inside the custom folder
         assert (folder / "TASK.md").exists()
-        assert (folder / "COMMUNICATION.md").exists()
         assert (folder / "VERIFICATION.md").exists()
 
     def test_creates_intermediate_dirs(self, tmp_path, monkeypatch):

@@ -140,14 +140,8 @@ class AgentCLI:
             pass
         task_description = "\n".join(task_lines)
 
-        # 2. Contact rules
-        print("\n\n2. CONTACT RULES")
-        print("-" * 40)
-        print("When should the agent contact you? (e.g., 'Only when blocked', 'Every major decision', etc.):")
-        contact_rules = input("> ")
-
-        # 3. Success criteria
-        print("\n3. SUCCESS CRITERIA")
+        # 2. Success criteria
+        print("\n2. SUCCESS CRITERIA")
         print("-" * 40)
         print("How does 'done' look like? What defines success?")
         print("(Enter multi-line input, press Ctrl+Z then Enter when done on Windows,")
@@ -162,10 +156,10 @@ class AgentCLI:
             pass
         success_criteria = "\n".join(success_lines)
 
-        return task_description, contact_rules, success_criteria
+        return task_description, 'Only when blocked', success_criteria
 
     def setup_project(self, task_description, contact_rules, success_criteria, project_folder_path=None):
-        """Phase 2: Create subfolder and 3 files"""
+        """Phase 2: Create subfolder and project files"""
         if project_folder_path is not None:
             self.project_folder = Path(project_folder_path)
         else:
@@ -180,9 +174,6 @@ class AgentCLI:
 ## Task Description
 {task_description}
 
-## Contact Rules
-{contact_rules}
-
 ## Important Notes
 - This file is READ ONLY
 - This is the ONLY source of truth for the task
@@ -193,19 +184,7 @@ class AgentCLI:
 """
         self.task_file.write_text(task_content, encoding='utf-8')
 
-        # File 2: Communication method
-        self.communication_file = self.project_folder / "COMMUNICATION.md"
-        comm_content = f"""# Communication Method
-
-## Current Method
-Native CLI questions
-
-## Contact Rules
-{contact_rules}
-"""
-        self.communication_file.write_text(comm_content, encoding='utf-8')
-
-        # File 3: Verification criteria
+        # File 2: Verification criteria
         self.verification_file = self.project_folder / "VERIFICATION.md"
         verification_content = f"""# Verification Criteria
 
@@ -222,7 +201,6 @@ Return one of:
 
         print(f"\n[+] Project created: {self.project_folder}")
         print(f"  - {self.task_file.name}")
-        print(f"  - {self.communication_file.name}")
         print(f"  - {self.verification_file.name}\n")
 
         return self.project_folder

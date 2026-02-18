@@ -37,15 +37,6 @@ class TestSetupProject:
         assert "Build API" in content
         assert "READ ONLY" in content
 
-    def test_creates_communication_file(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        cli = AgentCLI()
-        folder = cli.setup_project("Task", "Every major decision", "Done")
-        comm_file = folder / "COMMUNICATION.md"
-        assert comm_file.exists()
-        content = comm_file.read_text(encoding="utf-8")
-        assert "Every major decision" in content
-
     def test_creates_verification_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli = AgentCLI()
@@ -67,7 +58,6 @@ class TestSetupProject:
         cli.setup_project("T", "R", "C")
         assert cli.project_folder is not None
         assert cli.task_file is not None
-        assert cli.communication_file is not None
         assert cli.verification_file is not None
 
 
