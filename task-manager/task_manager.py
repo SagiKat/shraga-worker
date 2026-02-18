@@ -746,7 +746,8 @@ class TaskManager:
         tool_descriptions = (
             "Available tools (call via JSON):\n"
             "- create_task(prompt, description): Create a new coding task. "
-            "A background process monitors it and sends a follow-up with the progress link.\n"
+            "Do NOT include file paths or working directories in the prompt -- "
+            "the worker has its own session folder. Just describe what to create.\n"
             "- cancel_task(task_id): Cancel a task. Use 'latest' for the most recent running task.\n"
             "- check_task_status(task_id): Get current status of a specific task.\n"
             "- list_recent_tasks(): List the user's recent tasks.\n"
@@ -758,8 +759,7 @@ class TaskManager:
             f"create coding tasks, check task status, cancel tasks, and answer "
             f"questions about their work.\n\n"
             f"Current state:\n{context}\n\n"
-            f"Dev box: {platform.node()}\n"
-            f"Working directory: {self.working_dir or 'not configured'}\n\n"
+            f"Dev box: {platform.node()}\n\n"
             f"{tool_descriptions}\n"
             f"Respond with JSON. Either:\n"
             f'  {{"response": "your message", "followup_expected": true/false}}\n'
