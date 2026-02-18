@@ -168,11 +168,54 @@
                                 },
                                 {
                                   "type": "TextBlock",
+                                  "text": "{taskTitleShort}",
+                                  "size": "Default",
+                                  "isSubtle": true,
+                                  "spacing": "None",
+                                  "wrap": true,
+                                  "id": "shortDesc",
+                                  "maxLines": 2
+                                },
+                                {
+                                  "type": "TextBlock",
                                   "text": "{taskTitle}",
                                   "size": "Default",
                                   "isSubtle": true,
                                   "spacing": "None",
-                                  "wrap": true
+                                  "wrap": true,
+                                  "id": "fullDesc",
+                                  "isVisible": false
+                                },
+                                {
+                                  "type": "ActionSet",
+                                  "spacing": "None",
+                                  "actions": [
+                                    {
+                                      "type": "Action.ToggleVisibility",
+                                      "title": "show more",
+                                      "id": "showMoreDesc",
+                                      "targetElements": [
+                                        { "elementId": "shortDesc", "isVisible": false },
+                                        { "elementId": "fullDesc", "isVisible": true },
+                                        { "elementId": "showMoreDesc", "isVisible": false },
+                                        { "elementId": "showLessDesc", "isVisible": true }
+                                      ],
+                                      "style": "positive"
+                                    },
+                                    {
+                                      "type": "Action.ToggleVisibility",
+                                      "title": "show less",
+                                      "id": "showLessDesc",
+                                      "isVisible": false,
+                                      "targetElements": [
+                                        { "elementId": "shortDesc", "isVisible": true },
+                                        { "elementId": "fullDesc", "isVisible": false },
+                                        { "elementId": "showMoreDesc", "isVisible": true },
+                                        { "elementId": "showLessDesc", "isVisible": false }
+                                      ],
+                                      "style": "positive"
+                                    }
+                                  ]
                                 }
                               ],
                               "verticalContentAlignment": "Center"
@@ -260,7 +303,7 @@
                   ]
                 },
                 "type": "Compose",
-                "inputs": "@replace(replace(string(outputs('Compose_CardTemplate')),'{taskTitle}',replace(replace(replace(replace(take(coalesce(outputs('Get_a_row_by_ID')?['body/cr_prompt'],'Task'),500), '\\', '\\\\'), '\"', '\\\"'), decodeUriComponent('%0A'), ' | '), decodeUriComponent('%0D'), '')),'{startedAt}',concat(formatDateTime(utcNow(),'MMM dd, yyyy h:mm tt'),' UTC'))"
+                "inputs": "@replace(replace(replace(string(outputs('Compose_CardTemplate')),'{taskTitleShort}',replace(replace(replace(replace(take(coalesce(outputs('Get_a_row_by_ID')?['body/cr_prompt'],'Task'),80), '\\', '\\\\'), '\"', '\\\"'), decodeUriComponent('%0A'), ' | '), decodeUriComponent('%0D'), '')),'{taskTitle}',replace(replace(replace(replace(take(coalesce(outputs('Get_a_row_by_ID')?['body/cr_prompt'],'Task'),500), '\\', '\\\\'), '\"', '\\\"'), decodeUriComponent('%0A'), ' | '), decodeUriComponent('%0D'), '')),'{startedAt}',concat(formatDateTime(utcNow(),'MMM dd, yyyy h:mm tt'),' UTC'))"
               },
               "Compose_CardWithOneDrive": {
                 "runAfter": {
