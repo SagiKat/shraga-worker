@@ -149,7 +149,7 @@
                                 {
                                   "type": "Image",
                                   "url": "https://cdn-icons-png.flaticon.com/512/4712/4712109.png",
-                                  "size": "Small",
+                                  "size": "Medium",
                                   "style": "Person",
                                   "altText": "Shraga Agent"
                                 }
@@ -164,7 +164,7 @@
                                   "type": "TextBlock",
                                   "text": "Shraga Worker",
                                   "weight": "Bolder",
-                                  "size": "Medium"
+                                  "size": "Large"
                                 },
                                 {
                                   "type": "TextBlock",
