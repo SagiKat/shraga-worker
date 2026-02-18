@@ -24,11 +24,10 @@
           "type": "OpenApiConnectionWebhook",
           "inputs": {
             "parameters": {
-              "subscriptionRequest/message": 3,
+              "subscriptionRequest/message": 1,
               "subscriptionRequest/entityname": "cr_shraga_task",
               "subscriptionRequest/scope": 4,
-              "subscriptionRequest/filteringattributes": "cr_status",
-              "subscriptionRequest/filterexpression": "cr_status eq 5"
+              "subscriptionRequest/filterexpression": "cr_status eq 1"
             },
             "host": {
               "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
@@ -184,8 +183,8 @@
                               "items": [
                                 {
                                   "type": "TextBlock",
-                                  "text": "RUNNING",
-                                  "color": "Good",
+                                  "text": "QUEUED",
+                                  "color": "Warning",
                                   "size": "Small",
                                   "weight": "Bolder"
                                 }
@@ -213,7 +212,7 @@
                           "items": [
                             {
                               "type": "TextBlock",
-                              "text": "Task started. Waiting for worker output...",
+                              "text": "Task queued. Waiting for available worker...",
                               "wrap": true,
                               "size": "Small",
                               "fontType": "Monospace"
@@ -230,7 +229,7 @@
                           "type": "FactSet",
                           "facts": [
                             {
-                              "title": "Started",
+                              "title": "Submitted",
                               "value": "{startedAt}"
                             }
                           ]
@@ -340,7 +339,7 @@
                 "not": {
                   "equals": [
                     "@outputs('Get_a_row_by_ID')?['body/cr_status']",
-                    5
+                    1
                   ]
                 }
               }

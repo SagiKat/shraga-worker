@@ -40,6 +40,7 @@ STATUS_RUNNING = 5
 STATUS_WAITING_FOR_INPUT = 6
 STATUS_COMPLETED = 7
 STATUS_FAILED = 8
+STATUS_CANCELED = 9
 
 def format_session_numbers(stats: dict) -> str:
     """Format accumulated session stats into a one-line summary string.
@@ -460,6 +461,31 @@ class IntegratedTaskWorker:
             return False
         except Exception as e:
             print(f"[ERROR] claim_task: {e}")
+            return False
+
+    def is_task_canceled(self, task_id: str) -> bool:
+        """Check if a task has been canceled (status=9) in Dataverse.
+
+        Called periodically during task execution to support cancellation.
+        """
+        if not task_id:
+            return False
+        headers = self._get_headers()
+        if not headers:
+            return False
+        try:
+            url = (
+                f"{DATAVERSE_URL}/api/data/v9.2/{TABLE}({task_id})"
+                f"?$select=cr_status"
+            )
+            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            if resp.status_code == 200:
+                status = resp.json().get("cr_status")
+                if status == STATUS_CANCELED:
+                    print(f"[CANCEL] Task {task_id[:8]} has been canceled")
+                    return True
+            return False
+        except Exception:
             return False
 
     def queue_task(self, task: dict) -> bool:
@@ -1148,6 +1174,13 @@ JSON output:"""
             verifier_feedback = None
 
             while iteration <= 10:  # Max 10 iterations
+                # Check for cancellation before each iteration
+                if self.is_task_canceled(task_id):
+                    cancel_msg = "Task canceled by user"
+                    self.send_to_webhook(cancel_msg)
+                    _finalize_summary("canceled", cancel_msg)
+                    return False, cancel_msg, transcript, accumulated_stats
+
                 print(f"\n[ITERATION {iteration}]")
 
                 # Update Dataverse
@@ -1200,6 +1233,13 @@ JSON output:"""
                     return False, f"Blocked: {output}", transcript, accumulated_stats
 
                 elif status == "done":
+                    # Check for cancellation before verification
+                    if self.is_task_canceled(task_id):
+                        cancel_msg = "Task canceled by user (before verification)"
+                        self.send_to_webhook(cancel_msg)
+                        _finalize_summary("canceled", cancel_msg)
+                        return False, cancel_msg, transcript, accumulated_stats
+
                     # Verification phase
                     print(f"\n[VERIFICATION]")
 

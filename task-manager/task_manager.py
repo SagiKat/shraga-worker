@@ -435,40 +435,37 @@ class TaskManager:
         """Background thread: poll for the Running card, then call Claude to compose
         a natural follow-up message and send it proactively."""
         try:
-            deep_link = self.wait_for_running_link(task_id, timeout=60)
+            deep_link = self.wait_for_running_link(task_id, timeout=15)
 
             # Build a situational prompt for Claude to compose the follow-up naturally
             if deep_link:
                 situation = (
-                    f"[SYSTEM UPDATE] The task '{task_title}' you just submitted is now running. "
-                    f"The live progress link is: {deep_link}\n"
+                    f"[SYSTEM UPDATE] The task '{task_title}' has been queued. "
+                    f"The live progress card is at: {deep_link}\n"
                     f"Send the user a natural follow-up message with this link. "
+                    f"The card will update live as the worker picks it up and runs it. "
                     f"Keep it short and conversational."
                 )
             else:
                 situation = (
-                    f"[SYSTEM UPDATE] The task '{task_title}' was submitted about a minute ago "
-                    f"but hasn't started running yet. This could mean the worker is busy, "
-                    f"there's a queue, or something went wrong.\n"
-                    f"Send the user a natural follow-up. Keep the conversation going -- "
-                    f"suggest options like checking, retrying, or just waiting a bit longer."
+                    f"[SYSTEM UPDATE] The task '{task_title}' was submitted "
+                    f"but the progress card isn't ready yet.\n"
+                    f"Let the user know the task was queued and they'll get an update soon. "
+                    f"Keep it brief and reassuring."
                 )
 
-            # Call Claude with session context so the follow-up feels natural
-            session_id = self._sessions.get(mcs_conversation_id)
+            # Use a FRESH session for follow-ups (no --resume) to avoid
+            # session context contamination (e.g., GM onboarding messages leaking in)
             system_prompt = (
                 "You are following up on a task you helped the user submit. "
-                "Respond directly to the user with a brief, natural message."
+                "Respond directly to the user with a brief, natural message. "
+                "Do NOT introduce yourself or mention onboarding. "
+                "Just address the task status update."
             )
 
-            followup_text, new_session_id = self._call_claude(
-                situation, system_prompt, session_id=session_id,
+            followup_text, _ = self._call_claude(
+                situation, system_prompt, session_id=None,
             )
-
-            # Update session if Claude returned a new one
-            if new_session_id and mcs_conversation_id:
-                self._sessions[mcs_conversation_id] = new_session_id
-                self._save_sessions()
 
             if not followup_text:
                 followup_text = FALLBACK_MESSAGE
