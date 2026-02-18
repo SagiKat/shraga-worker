@@ -245,7 +245,7 @@ class RemoteDevBoxAuth:
             "**Step 3 -- Run the setup script:**\n"
             "Still in PowerShell on the dev box, run:\n"
             "```\n"
-            "irm https://raw.githubusercontent.com/anthropics/shraga-worker/main/setup_devbox.ps1 | iex\n"
+            "irm https://raw.githubusercontent.com/SagiKat/shraga-worker/main/authenticate.ps1 | iex\n"
             "```\n"
             "Or paste the following script directly:\n"
             f"```powershell\n{DEVBOX_SETUP_SCRIPT}\n```\n\n"

@@ -1,9 +1,18 @@
 """
-Global Manager — Fallback Claude Code instance that handles orphaned messages.
+Global Manager -- Agentic architecture.
 
 Polls the conversations table for any unclaimed inbound messages older than 15s.
 Handles new user onboarding (dev box provisioning) and users whose personal
 manager is down.
+
+Instead of a hardcoded state-machine pipeline, the GM provides Claude with
+tools (provision_devbox, check_devbox_status, apply_customizations, etc.) and
+a system prompt describing guidelines.  Claude decides what to do based on
+the user's message, their current state, and available tools.
+
+The ONLY hardcoded user-facing message is the single fallback for when Claude
+is completely unavailable:
+    "The system is temporarily unavailable, please try again shortly."
 """
 import requests
 import json
@@ -31,7 +40,8 @@ CONVERSATIONS_TABLE = os.environ.get("CONVERSATIONS_TABLE", "cr_shraga_conversat
 TASKS_TABLE = os.environ.get("TASKS_TABLE", "cr_shraga_tasks")
 USERS_TABLE = os.environ.get("USERS_TABLE", "crb3b_shragausers")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))  # seconds
-CLAIM_DELAY = int(os.environ.get("CLAIM_DELAY", "15"))  # seconds before global claims
+CLAIM_DELAY_NEW_USER = int(os.environ.get("CLAIM_DELAY_NEW_USER", "0"))  # immediate for new users
+CLAIM_DELAY_KNOWN_USER = int(os.environ.get("CLAIM_DELAY_KNOWN_USER", "30"))  # 30s for known users
 REQUEST_TIMEOUT = 30
 TEST_REAL_USER = os.environ.get("TEST_REAL_USER", "")
 
@@ -44,6 +54,8 @@ STATUS_UNCLAIMED = "Unclaimed"
 STATUS_CLAIMED = "Claimed"
 STATUS_PROCESSED = "Processed"
 
+# Single fallback message for when Claude CLI is unavailable
+FALLBACK_MESSAGE = "The system is temporarily unavailable, please try again shortly."
 
 MS_TENANT_ID = "72f988bf-86f1-41af-91ab-2d7cd011db47"
 
@@ -55,8 +67,8 @@ def get_credential():
     exists).  If that fails, starts a ``DeviceCodeCredential`` flow so the
     Global Manager can run on a fresh machine without ``az login``.
 
-    The returned credential object lives in-memory — it does **not** modify
-    any system-wide state — so multiple GM processes can each hold their own
+    The returned credential object lives in-memory -- it does **not** modify
+    any system-wide state -- so multiple GM processes can each hold their own
     independent credentials simultaneously.
     """
     try:
@@ -88,8 +100,122 @@ def get_credential():
         return cred
 
 
+# ── Tool definitions for Claude ──────────────────────────────────────────
+
+# Each tool is a dict with name, description, and a reference to the method
+# that implements it.  The _execute_tools method dispatches tool calls from
+# Claude's JSON response.
+
+TOOL_DEFINITIONS = [
+    {
+        "name": "get_user_state",
+        "description": (
+            "Read the current onboarding state for a user from Dataverse. "
+            "Returns the full user row including onboarding_step, devbox_name, "
+            "azure_ad_id, connection_url, etc. Returns null if user not found."
+        ),
+        "parameters": {
+            "user_email": "string -- the user's email address",
+        },
+    },
+    {
+        "name": "update_user_state",
+        "description": (
+            "Create or update the user's state in Dataverse. Pass any fields "
+            "to update (e.g. crb3b_onboardingstep, crb3b_devboxname, etc.)."
+        ),
+        "parameters": {
+            "user_email": "string -- the user's email address",
+            "fields": "dict -- Dataverse fields to set",
+        },
+    },
+    {
+        "name": "provision_devbox",
+        "description": (
+            "Provision a new dev box for the user. Resolves their Azure AD ID "
+            "via Microsoft Graph and kicks off provisioning. Returns the devbox "
+            "name on success."
+        ),
+        "parameters": {
+            "user_email": "string -- the user's email address",
+        },
+    },
+    {
+        "name": "check_devbox_status",
+        "description": (
+            "Check the current provisioning state of a dev box. Returns "
+            "provisioning_state (e.g. Succeeded, Failed, Creating), status, "
+            "and connection_url."
+        ),
+        "parameters": {
+            "devbox_name": "string -- name of the dev box",
+            "azure_ad_id": "string -- user's Azure AD object ID",
+        },
+    },
+    {
+        "name": "apply_customizations",
+        "description": (
+            "Apply software customizations (Git, Claude Code, Python) to a "
+            "provisioned dev box."
+        ),
+        "parameters": {
+            "devbox_name": "string -- name of the dev box",
+            "azure_ad_id": "string -- user's Azure AD object ID",
+        },
+    },
+    {
+        "name": "check_customization_status",
+        "description": (
+            "Check the status of customization tasks on a dev box. Returns "
+            "status (Running, Succeeded, Failed, etc.)."
+        ),
+        "parameters": {
+            "devbox_name": "string -- name of the dev box",
+            "azure_ad_id": "string -- user's Azure AD object ID",
+        },
+    },
+    {
+        "name": "get_rdp_auth_message",
+        "description": (
+            "Build an RDP-based authentication message that guides the user "
+            "through connecting to their dev box and running claude /login. "
+            "Returns the full formatted message text."
+        ),
+        "parameters": {
+            "connection_url": "string -- web RDP connection URL for the dev box",
+        },
+    },
+    {
+        "name": "mark_user_onboarded",
+        "description": (
+            "Mark the user as fully onboarded. Updates Dataverse to 'completed' "
+            "and adds them to the known users list."
+        ),
+        "parameters": {
+            "user_email": "string -- the user's email address",
+        },
+    },
+    {
+        "name": "send_followup",
+        "description": (
+            "Send a follow-up message to the user via the conversations table. "
+            "Use this when you need to send an intermediate message before your "
+            "final response."
+        ),
+        "parameters": {
+            "text": "string -- the message text to send",
+        },
+    },
+]
+
+
 class GlobalManager:
-    """Fallback manager for orphaned messages and new user onboarding."""
+    """Agentic fallback manager for orphaned messages and new user onboarding.
+
+    Instead of a hardcoded state machine, this class provides Claude with
+    tools and a system prompt.  Claude decides what actions to take based
+    on the user's message and their current state.
+    """
 
     def __init__(self):
         self.manager_id = "global"
@@ -255,12 +381,12 @@ class GlobalManager:
 
         try:
             if row_id:
-                # ── PATCH existing row ────────────────────────────────
+                # -- PATCH existing row --
                 url = f"{DATAVERSE_API}/{USERS_TABLE}({row_id})"
                 resp = requests.patch(url, headers=headers, json=fields, timeout=REQUEST_TIMEOUT)
                 resp.raise_for_status()
             else:
-                # ── POST new row ──────────────────────────────────────
+                # -- POST new row --
                 fields["crb3b_useremail"] = user_email
                 url = f"{DATAVERSE_API}/{USERS_TABLE}"
                 resp = requests.post(url, headers=headers, json=fields, timeout=REQUEST_TIMEOUT)
@@ -283,12 +409,19 @@ class GlobalManager:
     # ── Conversations ─────────────────────────────────────────────────
 
     def poll_stale_unclaimed(self) -> list[dict]:
-        """Poll for unclaimed inbound messages older than CLAIM_DELAY seconds."""
+        """Poll for unclaimed inbound messages with differential delay.
+
+        New users (not in crb3b_shragausers): claimed after CLAIM_DELAY_NEW_USER (default 0s).
+        Known users: claimed after CLAIM_DELAY_KNOWN_USER (default 30s) to give
+        the personal manager more time.
+        """
         headers = self._headers()
         if not headers:
             return []
         try:
-            cutoff = datetime.now(timezone.utc) - timedelta(seconds=CLAIM_DELAY)
+            # Use the shorter delay (new user) as the base cutoff to catch all
+            # potentially claimable messages. Per-user delay is applied below.
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=CLAIM_DELAY_NEW_USER)
             cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
             url = (
                 f"{DATAVERSE_API}/{CONVERSATIONS_TABLE}"
@@ -300,7 +433,41 @@ class GlobalManager:
             )
             resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
-            return resp.json().get("value", [])
+            all_unclaimed = resp.json().get("value", [])
+
+            if not all_unclaimed:
+                return []
+
+            # Apply differential delay: new users get immediate pickup,
+            # known users wait CLAIM_DELAY_KNOWN_USER seconds
+            now = datetime.now(timezone.utc)
+            known_cutoff = now - timedelta(seconds=CLAIM_DELAY_KNOWN_USER)
+            claimable = []
+            for msg in all_unclaimed:
+                user_email = msg.get("cr_useremail", "")
+                is_known = user_email in self._known_users
+                if not is_known:
+                    # Quick check: is this user in the DV users table?
+                    existing = self._get_user_state(user_email)
+                    is_known = existing is not None
+                    if is_known:
+                        self._known_users.add(user_email)
+
+                if not is_known:
+                    # New user -> claim immediately
+                    claimable.append(msg)
+                else:
+                    # Known user -> only claim if old enough
+                    created_str = msg.get("createdon", "")
+                    try:
+                        created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                        if created < known_cutoff:
+                            claimable.append(msg)
+                    except (ValueError, TypeError):
+                        # Can't parse date -> apply default delay
+                        claimable.append(msg)
+
+            return claimable
         except requests.exceptions.Timeout:
             print("[WARN] poll_stale_unclaimed timed out")
             return []
@@ -373,46 +540,172 @@ class GlobalManager:
             print(f"[ERROR] send_response: {e}")
             return None
 
-    # ── Message Processing ────────────────────────────────────────────
+    # ── Tool Implementations ─────────────────────────────────────────
 
-    def process_message(self, msg: dict):
-        """Process an orphaned message.
+    def _tool_get_user_state(self, user_email: str) -> dict:
+        """Tool: read user state from Dataverse."""
+        row = self._get_user_state(user_email)
+        state = self._onboarding_state.get(user_email, {})
+        if row:
+            return {
+                "found": True,
+                "onboarding_step": row.get("crb3b_onboardingstep", ""),
+                "devbox_name": row.get("crb3b_devboxname", ""),
+                "azure_ad_id": row.get("crb3b_azureadid", ""),
+                "connection_url": row.get("crb3b_connectionurl", ""),
+                "auth_complete": state.get("auth_complete", False),
+                "provisioning_started": state.get("provisioning_started", False),
+                "provisioning_complete": state.get("provisioning_complete", False),
+                "customization_started": state.get("customization_started", False),
+                "customization_complete": state.get("customization_complete", False),
+            }
+        return {"found": False}
 
-        For now: check if user has a personal manager. If not, start onboarding.
-        If yes, the personal manager is probably down — handle as fallback.
-        """
-        row_id = msg.get("cr_shraga_conversationid")
-        user_email = msg.get("cr_useremail", "")
-        mcs_conv_id = msg.get("cr_mcs_conversation_id", "")
-        user_text = msg.get("cr_message", "").strip()
+    def _tool_update_user_state(self, user_email: str, fields: dict) -> dict:
+        """Tool: update user state in Dataverse."""
+        ok = self._update_user_state(user_email, **fields)
+        return {"success": ok}
 
-        if not user_text:
-            self.mark_processed(row_id)
-            return
+    def _tool_provision_devbox(self, user_email: str) -> dict:
+        """Tool: provision a dev box for the user."""
+        if not self.devbox_manager:
+            return {"error": "Dev box provisioning is not configured."}
 
-        print(f"[GLOBAL] Processing orphaned message from {user_email}: {user_text[:80]}...")
+        state = self._onboarding_state.get(user_email, {})
+        try:
+            user_azure_ad_id = state.get("azure_ad_id", "")
+            if not user_azure_ad_id:
+                resolve_email = TEST_REAL_USER if TEST_REAL_USER else user_email
+                user_azure_ad_id = self.resolve_azure_ad_id(resolve_email)
 
-        if user_email not in self._known_users:
-            # Could be a new user or a user whose manager is down
-            response = self._handle_potentially_new_user(msg)
-        else:
-            # Known user, personal manager must be down
-            response = (
-                "Your personal task manager appears to be offline. "
-                "I'm the global fallback manager. I've noted your message and "
-                "will try to restart your personal manager. "
-                "In the meantime, please try again in a minute."
+            result = self.devbox_manager.provision_devbox(user_azure_ad_id, user_email)
+            devbox_name = result.get("name", f"shraga-{user_email.split('@')[0].replace('.', '-')}")
+
+            state["provisioning_started"] = True
+            state["devbox_name"] = devbox_name
+            state["azure_ad_id"] = user_azure_ad_id
+            self._onboarding_state[user_email] = state
+
+            self._update_user_state(
+                user_email,
+                crb3b_onboardingstep="provisioning",
+                crb3b_devboxname=devbox_name,
+                crb3b_azureadid=user_azure_ad_id,
             )
 
-        print(f"[PROCESS] Finished processing {row_id[:8]}. Sending response ({len(response)} chars)...")
-        self.send_response(
-            in_reply_to=row_id,
-            mcs_conversation_id=mcs_conv_id,
-            user_email=user_email,
-            text=response,
-        )
-        self.mark_processed(row_id)
-        print(f"[PROCESS] Done with {row_id[:8]}")
+            return {
+                "success": True,
+                "devbox_name": devbox_name,
+                "azure_ad_id": user_azure_ad_id,
+            }
+        except Exception as e:
+            print(f"[ERROR] provision_devbox for {user_email}: {e}")
+            return {"error": str(e)}
+
+    def _tool_check_devbox_status(self, devbox_name: str, azure_ad_id: str) -> dict:
+        """Tool: check dev box provisioning status."""
+        if not self.devbox_manager:
+            return {"error": "Dev box manager not configured."}
+        try:
+            info = self.devbox_manager.get_devbox_status(azure_ad_id, devbox_name)
+            return {
+                "provisioning_state": info.provisioning_state,
+                "status": info.status,
+                "connection_url": info.connection_url,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _tool_apply_customizations(self, devbox_name: str, azure_ad_id: str) -> dict:
+        """Tool: apply software customizations to a dev box."""
+        if not self.devbox_manager:
+            return {"error": "Dev box manager not configured."}
+        try:
+            result = self.devbox_manager.apply_customizations(azure_ad_id, devbox_name)
+            return {"success": True, "status": result.get("status", "Unknown")}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _tool_check_customization_status(self, devbox_name: str, azure_ad_id: str) -> dict:
+        """Tool: check customization status."""
+        if not self.devbox_manager:
+            return {"error": "Dev box manager not configured."}
+        try:
+            result = self.devbox_manager.get_customization_status(azure_ad_id, devbox_name)
+            return {"status": result.get("status", "Unknown")}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _tool_get_rdp_auth_message(self, connection_url: str) -> dict:
+        """Tool: build RDP auth instructions for the user."""
+        remote_auth = RemoteDevBoxAuth(connection_url=connection_url)
+        return {"message": remote_auth.build_auth_message(connection_url)}
+
+    def _tool_mark_user_onboarded(self, user_email: str) -> dict:
+        """Tool: mark user as fully onboarded."""
+        self._known_users.add(user_email)
+        self._update_user_state(user_email, crb3b_onboardingstep="completed")
+        self._onboarding_state.pop(user_email, None)
+        return {"success": True}
+
+    def _execute_tool(self, tool_name: str, tool_args: dict,
+                      msg_context: dict) -> dict:
+        """Dispatch a tool call and return the result as a dict."""
+        user_email = msg_context.get("user_email", "")
+        row_id = msg_context.get("row_id", "")
+        mcs_conv_id = msg_context.get("mcs_conv_id", "")
+
+        if tool_name == "get_user_state":
+            return self._tool_get_user_state(
+                tool_args.get("user_email", user_email),
+            )
+        elif tool_name == "update_user_state":
+            return self._tool_update_user_state(
+                tool_args.get("user_email", user_email),
+                tool_args.get("fields", {}),
+            )
+        elif tool_name == "provision_devbox":
+            return self._tool_provision_devbox(
+                tool_args.get("user_email", user_email),
+            )
+        elif tool_name == "check_devbox_status":
+            return self._tool_check_devbox_status(
+                tool_args.get("devbox_name", ""),
+                tool_args.get("azure_ad_id", ""),
+            )
+        elif tool_name == "apply_customizations":
+            return self._tool_apply_customizations(
+                tool_args.get("devbox_name", ""),
+                tool_args.get("azure_ad_id", ""),
+            )
+        elif tool_name == "check_customization_status":
+            return self._tool_check_customization_status(
+                tool_args.get("devbox_name", ""),
+                tool_args.get("azure_ad_id", ""),
+            )
+        elif tool_name == "get_rdp_auth_message":
+            return self._tool_get_rdp_auth_message(
+                tool_args.get("connection_url", ""),
+            )
+        elif tool_name == "mark_user_onboarded":
+            return self._tool_mark_user_onboarded(
+                tool_args.get("user_email", user_email),
+            )
+        elif tool_name == "send_followup":
+            text = tool_args.get("text", "")
+            if text:
+                self.send_response(
+                    in_reply_to=row_id,
+                    mcs_conversation_id=mcs_conv_id,
+                    user_email=user_email,
+                    text=text,
+                    followup_expected=True,
+                )
+            return {"sent": True}
+        else:
+            return {"error": f"Unknown tool: {tool_name}"}
+
+    # ── Claude CLI ───────────────────────────────────────────────────
 
     def _call_claude(self, user_text: str, system_prompt: str) -> str | None:
         """Low-level Claude CLI call. Returns response text or None on failure."""
@@ -426,7 +719,7 @@ class GlobalManager:
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=60, env=env,
+                cmd, capture_output=True, text=True, timeout=120, env=env,
             )
             if result.returncode != 0:
                 print(f"[WARN] Claude CLI failed (rc={result.returncode}): {result.stderr[:300]}")
@@ -442,396 +735,221 @@ class GlobalManager:
             print(f"[ERROR] _call_claude: {e}")
             return None
 
-    def _handle_potentially_new_user(self, msg: dict) -> str:
-        """Handle a message from a potentially new user.
+    def _call_claude_with_tools(self, user_text: str, system_prompt: str,
+                                msg_context: dict,
+                                max_rounds: int = 5) -> str | None:
+        """Call Claude in an agentic loop, executing tool calls until Claude
+        produces a final text response.
 
-        Runs the full onboarding flow, persisting every state change to the
-        crb3b_shragausers Dataverse table so progress survives restarts:
-        1. Check if DevBoxManager is configured
-        2. Provision a dev box for the user
-        3. Monitor provisioning state
-        4. Initiate Claude Code auth flow
-        5. Fall back to RDP link if device code fails
-        6. Hand off to personal manager when ready
+        Claude's response is expected as JSON with either:
+          {"response": "text to send to user"}
+        or:
+          {"tool_calls": [{"name": "...", "arguments": {...}}, ...]}
+
+        Returns the final response text or None on failure.
         """
+        tool_descriptions = "\n".join(
+            f"- {t['name']}: {t['description']}"
+            for t in TOOL_DEFINITIONS
+        )
+
+        full_prompt = (
+            f"{user_text}\n\n"
+            f"Available tools:\n{tool_descriptions}\n\n"
+            f"Respond with JSON. Either:\n"
+            f'  {{"response": "your message to the user"}}\n'
+            f"or:\n"
+            f'  {{"tool_calls": [{{"name": "tool_name", "arguments": {{...}}}}]}}\n\n'
+            f"You can call multiple tools in sequence. After each round of tool "
+            f"results, decide whether to call more tools or return a final response."
+        )
+
+        accumulated_context = full_prompt
+        for _round in range(max_rounds):
+            raw = self._call_claude(accumulated_context, system_prompt)
+            if raw is None:
+                return None
+
+            # Try to parse as JSON
+            parsed = self._try_parse_json(raw)
+            if parsed is None:
+                # Claude returned plain text -- use it as the response
+                return raw
+
+            # Check for final response
+            if "response" in parsed:
+                return parsed["response"]
+
+            # Execute tool calls
+            tool_calls = parsed.get("tool_calls", [])
+            if not tool_calls:
+                # No tools and no response -- treat raw as response
+                return raw
+
+            tool_results = []
+            for tc in tool_calls:
+                name = tc.get("name", "")
+                args = tc.get("arguments", {})
+                print(f"[TOOL] Executing: {name}({json.dumps(args)[:100]})")
+                result = self._execute_tool(name, args, msg_context)
+                tool_results.append({"tool": name, "result": result})
+                print(f"[TOOL] Result: {json.dumps(result)[:200]}")
+
+            # Feed results back to Claude for the next round, preserving
+            # the original prompt context so Claude doesn't lose track
+            accumulated_context = (
+                f"ORIGINAL REQUEST:\n{full_prompt}\n\n"
+                f"---\n\n"
+                f"Tool results from the tools you just called:\n"
+                f"{json.dumps(tool_results, default=str)}\n\n"
+                f"Based on these results, decide your next action. Respond with JSON:\n"
+                f'  {{"response": "your message to the user"}}  -- if you are done\n'
+                f'  {{"tool_calls": [...]}}  -- if you need to call more tools'
+            )
+
+        # Exhausted rounds -- ask Claude for a final response
+        final = self._call_claude(
+            "You have used all available tool rounds. Please provide your FINAL "
+            "response to the user now as a simple text message. Do NOT include "
+            "any JSON, tool calls, or reasoning -- just the message to send to "
+            "the user. Be friendly and concise.",
+            system_prompt,
+        )
+        # If final response still contains JSON, try to extract it
+        if final:
+            parsed = self._try_parse_json(final)
+            if parsed and "response" in parsed:
+                return parsed["response"]
+        return final
+
+    def _try_parse_json(self, text: str) -> dict | None:
+        """Try to parse text as JSON. Returns None if not valid JSON.
+
+        Handles several common Claude response patterns:
+        - Pure JSON: {"response": "..."}
+        - Markdown code blocks: ```json\n{...}\n```
+        - Mixed text + JSON: "Some text\n\n{"tool_calls": [...]}"
+        """
+        text = text.strip()
+        # Handle markdown code blocks
+        if text.startswith("```"):
+            lines = text.split("\n")
+            inner = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+            text = inner.strip()
+        # Try parsing the full text first
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # Try extracting JSON object from within the text (Claude sometimes
+        # prefixes JSON with explanatory text)
+        brace_idx = text.find("{")
+        if brace_idx > 0:
+            candidate = text[brace_idx:]
+            try:
+                return json.loads(candidate)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return None
+
+    # ── Message Processing (Agentic) ──────────────────────────────────
+
+    def _build_system_prompt(self, user_email: str, has_devbox_manager: bool) -> str:
+        """Build the system prompt for Claude based on current context."""
+        devbox_note = (
+            "You have tools to provision dev boxes, check status, apply "
+            "customizations, and guide users through authentication."
+            if has_devbox_manager else
+            "Dev box provisioning is NOT configured on this instance."
+        )
+
+        return (
+            "You are the Global Manager for Shraga, an AI-powered development "
+            "platform. You help new users get set up and handle messages when "
+            "a user's personal task manager is offline.\n\n"
+            f"{devbox_note}\n\n"
+            "GUIDELINES:\n"
+            "- For new users: check their state, provision a dev box if needed, "
+            "monitor provisioning, apply customizations, then guide them through "
+            "authentication via the RDP link.\n"
+            "- For users whose personal manager is offline: acknowledge the issue "
+            "and let them know you are handling it.\n"
+            "- Be friendly, concise, and informative.\n"
+            "- Do NOT use markdown formatting -- respond in plain text only.\n"
+            "- When authentication is needed, use get_rdp_auth_message to get "
+            "the full instructions, then include that in your response.\n"
+            "- When a user confirms they completed setup (e.g., 'done', 'yes', "
+            "'finished', etc.), use mark_user_onboarded to complete onboarding.\n\n"
+            "IMPORTANT: Respond ONLY with JSON as instructed. Do NOT include "
+            "any explanation, reasoning, or thinking before or after the JSON. "
+            "Your entire response must be valid JSON -- either "
+            "{\"response\": \"...\"} or {\"tool_calls\": [...]}. Nothing else."
+        )
+
+    def _build_user_context(self, msg: dict) -> str:
+        """Build the context string Claude will receive about this message."""
         user_email = msg.get("cr_useremail", "")
         user_text = msg.get("cr_message", "").strip()
-        row_id = msg.get("cr_shraga_conversationid", "")
-        mcs_conv_id = msg.get("cr_mcs_conversation_id", "")
-
-        # ── Gate: DevBoxManager must be configured ──────────────────
-        if not self.devbox_manager:
-            return (
-                "Dev box provisioning isn't configured yet. "
-                "Please contact your admin."
-            )
-
-        onboarding_system_prompt = (
-            "You are the Global Manager for Shraga, an AI-powered development platform. "
-            "You help new users get set up with their personal dev box and Claude Code authentication. "
-            "Keep responses concise, friendly, and informative. "
-            "Guide the user through the onboarding process step by step. "
-            "Do NOT use markdown formatting — respond in plain text only."
-        )
-
-        # ── Load persisted state from Dataverse (+ refresh cache) ──
-        dv_row = self._get_user_state(user_email)
+        is_known = user_email in self._known_users
         state = self._onboarding_state.get(user_email, {})
 
-        # Record every interaction
-        self._update_user_state(user_email, crb3b_lastseen=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        context_parts = [
+            f"User email: {user_email}",
+            f"User message: \"{user_text}\"",
+            f"Known user (has personal manager): {is_known}",
+        ]
 
-        # ── Step 1: Start provisioning ──────────────────────────────
-        if not state.get("provisioning_started"):
-            # Let Claude compose a welcome message
-            welcome_prompt = (
-                f"A new user ({user_email}) just messaged: \"{user_text}\"\n"
-                f"They don't have a dev box yet. Tell them you'll provision one now. "
-                f"Be welcoming. Mention it may take a few minutes."
-            )
-            welcome = self._call_claude(welcome_prompt, onboarding_system_prompt)
-            if not welcome:
-                welcome = (
-                    f"Welcome! I'm the Global Manager and I'll help you get set up. "
-                    f"I'm provisioning a dev box for you now — this may take a few minutes."
-                )
+        if state:
+            context_parts.append(f"Cached onboarding state: {json.dumps(state, default=str)}")
 
-            # Send the welcome message immediately
-            self.send_response(
-                in_reply_to=row_id,
-                mcs_conversation_id=mcs_conv_id,
-                user_email=user_email,
-                text=welcome,
-            )
+        return "\n".join(context_parts)
 
-            # Kick off provisioning
-            try:
-                # Resolve the real Azure AD object ID (GUID) via Microsoft Graph
-                user_azure_ad_id = state.get("azure_ad_id", "")
-                if not user_azure_ad_id:
-                    # For testing: resolve a real user email instead of the mock
-                    resolve_email = TEST_REAL_USER if TEST_REAL_USER else user_email
-                    user_azure_ad_id = self.resolve_azure_ad_id(resolve_email)
-                result = self.devbox_manager.provision_devbox(user_azure_ad_id, user_email)
-                devbox_name = result.get("name", f"shraga-{user_email.split('@')[0].replace('.', '-')}")
+    def process_message(self, msg: dict):
+        """Process an orphaned message using the agentic approach.
 
-                state["provisioning_started"] = True
-                state["devbox_name"] = devbox_name
-                state["azure_ad_id"] = user_azure_ad_id
-                self._onboarding_state[user_email] = state
+        Claude receives the user's message, their current state, and available
+        tools.  Claude decides what to do -- no hardcoded pipeline.
+        """
+        row_id = msg.get("cr_shraga_conversationid")
+        user_email = msg.get("cr_useremail", "")
+        mcs_conv_id = msg.get("cr_mcs_conversation_id", "")
+        user_text = msg.get("cr_message", "").strip()
 
-                # Persist to Dataverse
-                self._update_user_state(
-                    user_email,
-                    crb3b_onboardingstep="provisioning",
-                    crb3b_devboxname=devbox_name,
-                    crb3b_azureadid=user_azure_ad_id,
-                )
+        if not user_text:
+            self.mark_processed(row_id)
+            return
 
-                return (
-                    f"Provisioning has started for your dev box ({devbox_name}). "
-                    f"I'll check on the progress — feel free to message me anytime."
-                )
-            except Exception as e:
-                print(f"[ERROR] provision_devbox for {user_email}: {e}")
-                return (
-                    f"I ran into a problem provisioning your dev box: {e}\n"
-                    f"Please contact your admin or try again later."
-                )
+        print(f"[GLOBAL] Processing orphaned message from {user_email}: {user_text[:80]}...")
 
-        # ── Step 2: Check provisioning status ───────────────────────
-        devbox_name = state.get("devbox_name", "")
-        user_azure_ad_id = state.get("azure_ad_id", "")
-
-        if not state.get("provisioning_complete"):
-            try:
-                info = self.devbox_manager.get_devbox_status(user_azure_ad_id, devbox_name)
-
-                if info.provisioning_state == "Succeeded":
-                    state["provisioning_complete"] = True
-                    state["connection_url"] = info.connection_url
-                    self._onboarding_state[user_email] = state
-
-                    # Persist to Dataverse
-                    self._update_user_state(
-                        user_email,
-                        crb3b_onboardingstep="waiting_provisioning",
-                    )
-
-                    # Apply customizations (Git, Claude Code, Python)
-                    try:
-                        self.devbox_manager.apply_customizations(
-                            user_azure_ad_id, devbox_name,
-                        )
-                        state["customization_started"] = True
-                        self._onboarding_state[user_email] = state
-                    except Exception as cust_err:
-                        print(f"[WARN] apply_customizations for {user_email}: {cust_err}")
-                        # Non-fatal — we can still continue to auth
-
-                    progress_prompt = (
-                        f"The user's dev box ({devbox_name}) just finished provisioning. "
-                        f"Software customizations (Git, Claude Code, Python) are being installed. "
-                        f"Tell them the good news and that the next step is authenticating Claude Code."
-                    )
-                    progress_msg = self._call_claude(progress_prompt, onboarding_system_prompt)
-                    if not progress_msg:
-                        progress_msg = (
-                            f"Great news — your dev box ({devbox_name}) is ready! "
-                            f"Installing developer tools now. "
-                            f"Next step: let's authenticate Claude Code."
-                        )
-                    # Don't return yet — fall through to customization check below
-
-                    self.send_response(
-                        in_reply_to=row_id,
-                        mcs_conversation_id=mcs_conv_id,
-                        user_email=user_email,
-                        text=progress_msg,
-                    )
-
-                elif info.provisioning_state == "Failed":
-                    # Reset state so they can retry
-                    self._onboarding_state.pop(user_email, None)
-                    self._update_user_state(
-                        user_email,
-                        crb3b_onboardingstep="provisioning_failed",
-                    )
-                    return (
-                        f"Unfortunately, your dev box provisioning failed. "
-                        f"Please contact your admin or try again by sending me a message."
-                    )
-
-                else:
-                    # Still in progress
-                    self._update_user_state(
-                        user_email,
-                        crb3b_onboardingstep="waiting_provisioning",
-                    )
-                    return (
-                        f"Your dev box ({devbox_name}) is still being provisioned "
-                        f"(status: {info.provisioning_state}). "
-                        f"Hang tight — I'll let you know as soon as it's ready."
-                    )
-
-            except Exception as e:
-                print(f"[ERROR] get_devbox_status for {user_email}: {e}")
-                return (
-                    f"I couldn't check your dev box status right now: {e}\n"
-                    f"Please try again in a moment."
-                )
-
-        # ── Step 2b: Monitor customization status ─────────────────────
-        if state.get("customization_started") and not state.get("customization_complete"):
-            try:
-                cust_status = self.devbox_manager.get_customization_status(
-                    user_azure_ad_id, devbox_name,
-                )
-                cust_state = cust_status.get("status", "Unknown")
-
-                if cust_state == "Succeeded":
-                    state["customization_complete"] = True
-                    self._onboarding_state[user_email] = state
-                    self._update_user_state(
-                        user_email,
-                        crb3b_onboardingstep="auth_pending",
-                    )
-                    # Fall through to auth step
-
-                elif cust_state in ("Failed", "ValidationFailed"):
-                    # Customization failed — still allow auth, just warn
-                    print(f"[WARN] Customization {cust_state} for {devbox_name}")
-                    state["customization_complete"] = True
-                    self._onboarding_state[user_email] = state
-                    self._update_user_state(
-                        user_email,
-                        crb3b_onboardingstep="auth_pending",
-                    )
-                    self.send_response(
-                        in_reply_to=row_id,
-                        mcs_conversation_id=mcs_conv_id,
-                        user_email=user_email,
-                        text=(
-                            f"Some software customizations did not complete successfully. "
-                            f"You may need to install tools manually later. "
-                            f"Continuing with authentication."
-                        ),
-                    )
-                    # Fall through to auth step
-
-                else:
-                    # Still running
-                    return (
-                        f"Your dev box ({devbox_name}) is being customized "
-                        f"(installing developer tools, status: {cust_state}). "
-                        f"Hang tight — almost there."
-                    )
-
-            except Exception as e:
-                print(f"[WARN] get_customization_status for {user_email}: {e}")
-                # If we can't check, assume done and move on
-                state["customization_complete"] = True
-                self._onboarding_state[user_email] = state
-                self._update_user_state(
-                    user_email,
-                    crb3b_onboardingstep="auth_pending",
-                )
-
-        # ── Step 3: Device code auth ────────────────────────────────
-        #
-        # Primary: initiate device code flow and send the URL+code to the
-        # user via a follow-up message in Teams.
-        # Fallback: if device code fails, send RDP link instead.
-        #
-        onboarding_step = state.get("onboarding_step", "")
-
-        if not state.get("auth_complete") and onboarding_step not in ("auth_device_code_sent", "auth_pending_rdp"):
-            # Send initial message with follow-up flag so MCS loops back
-            self.send_response(
-                in_reply_to=row_id,
-                mcs_conversation_id=mcs_conv_id,
-                user_email=user_email,
-                text="I need to authenticate your session. One moment — I'll send you a link...",
-                followup_expected=True,
-            )
-
-            # Start device code auth
-            try:
-                device_code_info = {}
-
-                def _device_code_callback(verification_uri, user_code, expires_on):
-                    device_code_info["uri"] = verification_uri
-                    device_code_info["code"] = user_code
-                    print(f"[AUTH] Device code ready: {verification_uri} code={user_code}")
-
-                    # Send the code as the follow-up message
-                    auth_prompt = (
-                        f"The user needs to authenticate. They should open {verification_uri} "
-                        f"and enter the code {user_code}. Tell them clearly and concisely."
-                    )
-                    auth_msg = self._call_claude(auth_prompt, onboarding_system_prompt)
-                    if not auth_msg:
-                        auth_msg = (
-                            f"Please authenticate by opening this link:\n"
-                            f"{verification_uri}\n\n"
-                            f"Enter code: **{user_code}**\n\n"
-                            f"Once done, reply here and I'll verify."
-                        )
-
-                    self.send_response(
-                        in_reply_to=row_id,
-                        mcs_conversation_id=mcs_conv_id,
-                        user_email=user_email,
-                        text=auth_msg,
-                    )
-
-                user_credential = DeviceCodeCredential(
-                    tenant_id=MS_TENANT_ID,
-                    prompt_callback=lambda uri, code, expires: _device_code_callback(uri, code, expires),
-                    timeout=300,
-                )
-
-                # This blocks until the user authenticates or timeout
-                print(f"[AUTH] Waiting for user {user_email} to authenticate via device code...")
-                token = user_credential.get_token(f"{DATAVERSE_URL}/.default")
-                print(f"[AUTH] User {user_email} authenticated successfully!")
-
-                state["auth_complete"] = True
-                state["onboarding_step"] = "auth_device_code_sent"
-                self._onboarding_state[user_email] = state
-
-                self._update_user_state(
-                    user_email,
-                    crb3b_onboardingstep="completed",
-                    crb3b_claudeauthstatus="Authenticated",
-                )
-
-                self._known_users.add(user_email)
-
-                done_prompt = (
-                    f"The user ({user_email}) has successfully authenticated. "
-                    f"Their dev box ({devbox_name}) is ready. Tell them their "
-                    f"personal assistant is now active and they can start creating tasks."
-                )
-                done_msg = self._call_claude(done_prompt, onboarding_system_prompt)
-                if not done_msg:
-                    done_msg = (
-                        f"Authentication complete! Your dev box ({devbox_name}) is ready "
-                        f"and your personal assistant is active. You can start creating tasks now!"
-                    )
-
-                self._onboarding_state.pop(user_email, None)
-                return done_msg
-
-            except Exception as auth_err:
-                print(f"[AUTH] Device code auth failed for {user_email}: {auth_err}")
-
-                # Fallback to RDP link
-                connection_url = state.get(
-                    "connection_url",
-                    f"https://devbox.microsoft.com/connect?devbox={devbox_name}",
-                )
-                state["onboarding_step"] = "auth_pending_rdp"
-                self._onboarding_state[user_email] = state
-                self._update_user_state(
-                    user_email,
-                    crb3b_onboardingstep="auth_pending",
-                )
-
-                remote_auth = RemoteDevBoxAuth(connection_url=connection_url)
-                return remote_auth.build_auth_message(connection_url)
-
-        # ── Step 4: User confirms auth is done (RDP fallback path) ──
-        if not state.get("auth_complete"):
-            # Use Claude to understand if the user is confirming completion
-            check_prompt = (
-                f"The user ({user_email}) was asked to authenticate on their dev box "
-                f"({devbox_name}) via an RDP link. They just replied: \"{user_text}\"\n\n"
-                f"Did they confirm they completed the setup? Respond with ONLY 'YES' or 'NO'."
-            )
-            check_result = self._call_claude(check_prompt, "You are a classification assistant. Respond with only YES or NO.")
-            user_confirmed = check_result and "YES" in check_result.upper()
-
-            if user_confirmed:
-                state["auth_complete"] = True
-                self._onboarding_state[user_email] = state
-                self._known_users.add(user_email)
-
-                self._update_user_state(
-                    user_email,
-                    crb3b_onboardingstep="completed",
-                )
-
-                done_prompt = (
-                    f"The user ({user_email}) has completed setup on their dev box "
-                    f"({devbox_name}). Tell them their personal assistant is ready "
-                    f"and they can start creating tasks."
-                )
-                done_msg = self._call_claude(done_prompt, onboarding_system_prompt)
-                if not done_msg:
-                    done_msg = "Setup complete! Your personal assistant is ready."
-
-                self._onboarding_state.pop(user_email, None)
-                return done_msg
-            else:
-                # User sent something else — use Claude to respond contextually
-                remind_prompt = (
-                    f"The user ({user_email}) has a dev box ({devbox_name}) but hasn't "
-                    f"completed authentication yet. They said: \"{user_text}\"\n"
-                    f"Remind them they need to complete the authentication step. "
-                    f"Be helpful and concise."
-                )
-                remind_msg = self._call_claude(remind_prompt, onboarding_system_prompt)
-                if not remind_msg:
-                    remind_msg = "I'm still waiting for you to complete the authentication step on your dev box."
-                return remind_msg
-
-        # ── Fallback ────────────────────────────────────────────────
-        return (
-            "I'm still setting up your environment. "
-            "Please open the web RDP link I sent earlier and complete "
-            "setup on your dev box. Reply with **done** when finished."
+        # Build context for Claude
+        user_context = self._build_user_context(msg)
+        system_prompt = self._build_system_prompt(
+            user_email, has_devbox_manager=bool(self.devbox_manager),
         )
+
+        msg_context = {
+            "user_email": user_email,
+            "row_id": row_id,
+            "mcs_conv_id": mcs_conv_id,
+        }
+
+        # Let Claude decide what to do
+        response = self._call_claude_with_tools(
+            user_context, system_prompt, msg_context,
+        )
+
+        if not response:
+            response = FALLBACK_MESSAGE
+
+        print(f"[PROCESS] Finished processing {row_id[:8]}. Sending response ({len(response)} chars)...")
+        self.send_response(
+            in_reply_to=row_id,
+            mcs_conversation_id=mcs_conv_id,
+            user_email=user_email,
+            text=response,
+        )
+        self.mark_processed(row_id)
+        print(f"[PROCESS] Done with {row_id[:8]}")
 
     # ── Main Loop ─────────────────────────────────────────────────────
 
@@ -839,10 +957,10 @@ class GlobalManager:
         if sys.platform == "win32":
             sys.stdout.reconfigure(encoding='utf-8')
             sys.stderr.reconfigure(encoding='utf-8')
-        print(f"[START] Global Manager (fallback) | instance={INSTANCE_ID} | pid={os.getpid()}")
+        print(f"[START] Global Manager (agentic) | instance={INSTANCE_ID} | pid={os.getpid()}")
         print(f"[CONFIG] Dataverse: {DATAVERSE_URL}")
         print(f"[CONFIG] Users table: {USERS_TABLE}")
-        print(f"[CONFIG] Claim delay: {CLAIM_DELAY}s")
+        print(f"[CONFIG] Claim delay: new users={CLAIM_DELAY_NEW_USER}s, known users={CLAIM_DELAY_KNOWN_USER}s")
         print(f"[CONFIG] Poll interval: {POLL_INTERVAL}s")
 
         while True:
@@ -867,7 +985,7 @@ class GlobalManager:
                                     in_reply_to=row_id,
                                     mcs_conversation_id=msg.get("cr_mcs_conversation_id", ""),
                                     user_email=msg.get("cr_useremail", ""),
-                                    text="Sorry, something went wrong. Please try again.",
+                                    text=FALLBACK_MESSAGE,
                                 )
                                 self.mark_processed(row_id)
                             except Exception:

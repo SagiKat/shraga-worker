@@ -1,5 +1,5 @@
 """
-Tests for Personal Task Manager.
+Tests for Personal Task Manager (agentic architecture).
 
 All external dependencies (Azure, Dataverse, Claude CLI) are mocked.
 """
@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent / "task-manager"))
 from conftest import FakeAccessToken, FakeResponse, FakeCompletedProcess
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
+# -- Fixtures ------------------------------------------------------------------
 
 SAMPLE_CONVERSATION_ID = "conv-0001-0002-0003-000000000001"
 SAMPLE_MCS_CONV_ID = "mcs-conv-abc123"
@@ -62,7 +62,7 @@ def manager(mock_credential, monkeypatch):
     return mgr
 
 
-# ── Auth Tests ────────────────────────────────────────────────────────────────
+# -- Auth Tests ----------------------------------------------------------------
 
 class TestAuth:
     def test_get_token_success(self, manager):
@@ -106,7 +106,7 @@ class TestAuth:
         assert manager._headers() is None
 
 
-# ── Conversation Polling Tests ────────────────────────────────────────────────
+# -- Conversation Polling Tests ------------------------------------------------
 
 class TestPolling:
     @patch("task_manager.requests.get")
@@ -145,7 +145,7 @@ class TestPolling:
         assert msgs == []
 
 
-# ── Claim Tests ───────────────────────────────────────────────────────────────
+# -- Claim Tests ---------------------------------------------------------------
 
 class TestClaim:
     @patch("task_manager.requests.patch")
@@ -188,7 +188,7 @@ class TestClaim:
         assert manager.claim_message(msg) is False
 
 
-# ── Response Tests ────────────────────────────────────────────────────────────
+# -- Response Tests ------------------------------------------------------------
 
 class TestResponse:
     @patch("task_manager.requests.post")
@@ -212,7 +212,7 @@ class TestResponse:
         long_text = "x" * 500
         manager.send_response("id", "conv", long_text)
         body = mock_post.call_args[1]["json"]
-        assert len(body["cr_name"]) == 200
+        assert len(body["cr_name"]) == 100
 
     @patch("task_manager.requests.post")
     def test_send_response_returns_none_on_error(self, mock_post, manager):
@@ -221,7 +221,7 @@ class TestResponse:
         assert result is None
 
 
-# ── Task CRUD Tests ───────────────────────────────────────────────────────────
+# -- Task CRUD Tests -----------------------------------------------------------
 
 class TestTaskCRUD:
     @patch("task_manager.requests.post")
@@ -264,49 +264,110 @@ class TestTaskCRUD:
         assert len(msgs) == 1
 
 
-# ── Fallback Processing Tests ────────────────────────────────────────────────
+# -- Fallback Processing Tests ------------------------------------------------
 
 class TestFallbackProcessing:
-    def test_fallback_returns_generic_message(self, manager):
-        """Fallback is minimal — just a generic error message when Claude CLI is unavailable."""
+    def test_fallback_returns_standard_message(self, manager):
+        """Fallback is the single standardized message when Claude CLI is unavailable."""
         result = manager._fallback_process("anything", [])
-        assert len(result) > 0  # Returns some message
+        assert result == "The system is temporarily unavailable, please try again shortly."
 
 
-# ── Claude Integration Tests ─────────────────────────────────────────────────
+# -- Tool Implementation Tests ------------------------------------------------
+
+class TestToolImplementations:
+    """Test tool methods directly."""
+
+    @patch("task_manager.requests.post")
+    def test_tool_create_task(self, mock_post, manager):
+        mock_post.return_value = FakeResponse(json_data=SAMPLE_TASK)
+        result = manager._tool_create_task(
+            prompt="Fix the bug",
+            description="Fix the CSS",
+            mcs_conversation_id="",
+            inbound_row_id="",
+        )
+        assert result["success"] is True
+        assert result["task_id"] == SAMPLE_TASK_ID
+
+    def test_tool_cancel_task_latest(self, manager):
+        running_task = {**SAMPLE_TASK, "cr_status": 5, "cr_shraga_taskid": "running-123"}
+        with patch.object(manager, "cancel_task", return_value=True):
+            result = manager._tool_cancel_task("latest", [running_task])
+        assert result["success"] is True
+        assert result["task_id"] == "running-123"
+
+    def test_tool_cancel_task_specific(self, manager):
+        with patch.object(manager, "cancel_task", return_value=True):
+            result = manager._tool_cancel_task("task-xyz-123")
+        assert result["success"] is True
+
+    def test_tool_cancel_task_no_running(self, manager):
+        result = manager._tool_cancel_task("latest", [])
+        assert result["success"] is False
+
+    @patch("task_manager.requests.get")
+    def test_tool_check_task_status(self, mock_get, manager):
+        mock_get.return_value = FakeResponse(json_data=SAMPLE_TASK)
+        result = manager._tool_check_task_status(SAMPLE_TASK_ID)
+        assert result["status"] == "Pending"
+
+    @patch("task_manager.requests.get")
+    def test_tool_list_recent_tasks(self, mock_get, manager):
+        mock_get.return_value = FakeResponse(json_data={"value": [SAMPLE_TASK]})
+        result = manager._tool_list_recent_tasks()
+        assert len(result["tasks"]) == 1
+        assert result["tasks"][0]["status"] == "Pending"
+
+
+# -- Claude Integration Tests -------------------------------------------------
 
 class TestClaudeIntegration:
-    def test_execute_action_create_task(self, manager):
-        response = "ACTION: CREATE_TASK\nTITLE: Fix the bug\nDESCRIPTION: Fix the CSS\n---\nI've created a task to fix the bug."
-        with patch.object(manager, "create_task", return_value=SAMPLE_TASK):
-            result, followup = manager._execute_action(response, [])
-            assert "fix the bug" in result.lower() or "created" in result.lower()
-            assert followup is True  # task creation expects a follow-up
-
-    def test_execute_action_cancel_task(self, manager):
-        running_task = {**SAMPLE_TASK, "cr_status": 5}
-        response = "ACTION: CANCEL_TASK\nTASK_ID: latest\n---\nTask canceled."
-        with patch.object(manager, "cancel_task", return_value=True):
-            result, followup = manager._execute_action(response, [running_task])
-            assert "cancel" in result.lower()
-            assert followup is False
-
-    def test_execute_action_respond(self, manager):
-        response = "ACTION: RESPOND\n---\nYou have 2 tasks running."
-        result, followup = manager._execute_action(response, [])
+    def test_process_response_with_json_response(self, manager):
+        """When Claude returns a JSON response, it's extracted correctly."""
+        response_text = json.dumps({"response": "You have 2 tasks running.", "followup_expected": False})
+        result, followup = manager._process_claude_response(
+            response_text,
+            {"mcs_conv_id": "", "inbound_row_id": "", "recent_tasks": []},
+            "system prompt",
+        )
         assert "2 tasks running" in result
         assert followup is False
 
-    def test_execute_action_unparseable(self, manager):
-        response = "I'm not sure what format this is."
-        result, followup = manager._execute_action(response, [])
+    def test_process_response_with_plain_text(self, manager):
+        """When Claude returns plain text, it's used as-is."""
+        result, followup = manager._process_claude_response(
+            "I'm not sure what format this is.",
+            {"mcs_conv_id": "", "inbound_row_id": "", "recent_tasks": []},
+            "system prompt",
+        )
         assert "not sure" in result.lower()
         assert followup is False
+
+    def test_process_response_with_tool_call(self, manager):
+        """When Claude returns a tool call, the tool is executed."""
+        response_text = json.dumps({
+            "tool_calls": [{"name": "create_task", "arguments": {"prompt": "Fix the bug"}}]
+        })
+        with patch.object(manager, "create_task", return_value=SAMPLE_TASK), \
+             patch.object(manager, "_call_claude", return_value=(
+                 json.dumps({"response": "Task submitted!", "followup_expected": True}), ""
+             )):
+            result, followup = manager._process_claude_response(
+                response_text,
+                {"mcs_conv_id": "conv1", "inbound_row_id": "row1", "recent_tasks": []},
+                "system prompt",
+            )
+        assert "submitted" in result.lower() or "task" in result.lower()
 
     @patch("task_manager.subprocess.run")
     def test_ask_claude_success(self, mock_run, manager):
         mock_run.return_value = FakeCompletedProcess(
-            stdout='{"result":"ACTION: RESPOND\\n---\\nHere are your tasks.","session_id":"test-123","is_error":false}'
+            stdout=json.dumps({
+                "result": json.dumps({"response": "Here are your tasks.", "followup_expected": False}),
+                "session_id": "test-123",
+                "is_error": False,
+            })
         )
         result, followup = manager._ask_claude("status", "context", [])
         assert "tasks" in result.lower()
@@ -315,28 +376,26 @@ class TestClaudeIntegration:
     def test_ask_claude_timeout_uses_fallback(self, mock_run, manager):
         import subprocess
         mock_run.side_effect = subprocess.TimeoutExpired("claude", 60)
-        with patch.object(manager, "_fallback_process", return_value="fallback response"):
-            result, followup = manager._ask_claude("status", "context", [])
-            assert result == "fallback response"
-            assert followup is False
+        result, followup = manager._ask_claude("status", "context", [])
+        assert result == "The system is temporarily unavailable, please try again shortly."
+        assert followup is False
 
     @patch("task_manager.subprocess.run")
     def test_ask_claude_not_found_uses_fallback(self, mock_run, manager):
         mock_run.side_effect = FileNotFoundError()
-        with patch.object(manager, "_fallback_process", return_value="fallback response"):
-            result, followup = manager._ask_claude("status", "context", [])
-            assert result == "fallback response"
-            assert followup is False
+        result, followup = manager._ask_claude("status", "context", [])
+        assert result == "The system is temporarily unavailable, please try again shortly."
+        assert followup is False
 
 
-# ── Message Processing Integration Tests ──────────────────────────────────────
+# -- Message Processing Integration Tests --------------------------------------
 
 class TestProcessMessage:
     @patch("task_manager.requests.post")
     @patch("task_manager.requests.patch")
     @patch("task_manager.requests.get")
     def test_process_message_full_flow(self, mock_get, mock_patch, mock_post, manager):
-        """Test the full message processing flow: claim → process → respond."""
+        """Test the full message processing flow: claim -> process -> respond."""
         # list_tasks returns empty
         mock_get.return_value = FakeResponse(json_data={"value": []})
         # send_response succeeds
@@ -360,7 +419,7 @@ class TestProcessMessage:
             mock_mark.assert_called_once()
 
 
-# ── Constructor Tests ─────────────────────────────────────────────────────────
+# -- Constructor Tests ---------------------------------------------------------
 
 class TestConstructor:
     def test_requires_user_email(self, mock_credential):
@@ -376,7 +435,7 @@ class TestConstructor:
         assert manager.user_email == "testuser@example.com"
 
 
-# ── Stale Row Cleanup Tests ──────────────────────────────────────────────
+# -- Stale Row Cleanup Tests ---------------------------------------------------
 
 SAMPLE_STALE_ROW_1 = {
     "cr_shraga_conversationid": "stale-0001-0002-0003-000000000001",
@@ -398,8 +457,8 @@ SAMPLE_STALE_ROW_2 = {
 class TestStaleRowCleanup:
     @patch("task_manager.requests.patch")
     @patch("task_manager.requests.get")
-    def test_cleanup_marks_stale_rows_as_delivered(self, mock_get, mock_patch, manager):
-        """cleanup_stale_outbound patches each stale row with STATUS_DELIVERED."""
+    def test_cleanup_marks_stale_rows_as_expired(self, mock_get, mock_patch, manager):
+        """cleanup_stale_outbound patches each stale row with STATUS_EXPIRED (not Delivered)."""
         mock_get.return_value = FakeResponse(
             json_data={"value": [SAMPLE_STALE_ROW_1, SAMPLE_STALE_ROW_2]}
         )
@@ -409,10 +468,10 @@ class TestStaleRowCleanup:
 
         assert cleaned == 2
         assert mock_patch.call_count == 2
-        # Both patches should set status to Delivered
+        # Both patches should set status to Expired (not Delivered -- they were never delivered)
         for c in mock_patch.call_args_list:
             body = c[1]["json"]
-            assert body["cr_status"] == "Delivered"
+            assert body["cr_status"] == "Expired"
 
     @patch("task_manager.requests.patch")
     @patch("task_manager.requests.get")
@@ -458,3 +517,20 @@ class TestStaleRowCleanup:
         assert "cr_direction eq 'Outbound'" in url
         assert "cr_status eq 'Unclaimed'" in url
         assert "createdon lt" in url
+
+
+# -- JSON Parsing Tests --------------------------------------------------------
+
+class TestJsonParsing:
+    def test_valid_json(self, manager):
+        result = manager._try_parse_json('{"response": "hello"}')
+        assert result == {"response": "hello"}
+
+    def test_invalid_json_returns_none(self, manager):
+        result = manager._try_parse_json("This is plain text")
+        assert result is None
+
+    def test_json_in_code_block(self, manager):
+        text = '```json\n{"response": "hello"}\n```'
+        result = manager._try_parse_json(text)
+        assert result == {"response": "hello"}

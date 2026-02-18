@@ -1,9 +1,17 @@
 """
-Personal Task Manager — Claude Code instance that handles one user's conversations.
+Personal Task Manager -- Agentic architecture.
 
 Polls the conversations table for unclaimed inbound messages from its user,
-processes them (create tasks, check status, answer questions), and writes
-outbound responses. Runs on the user's dev box.
+processes them via Claude with tools, and writes outbound responses.
+Runs on the user's dev box.
+
+Instead of a fixed ACTION: RESPOND/CREATE_TASK/CANCEL_TASK format, Claude
+has tools it can call directly.  Claude decides freely what to do based on
+the user's message, conversation history, and available tools.
+
+The ONLY hardcoded user-facing message is the single fallback for when Claude
+is completely unavailable:
+    "The system is temporarily unavailable, please try again shortly."
 """
 import requests
 import json
@@ -22,7 +30,7 @@ from datetime import datetime, timezone, timedelta
 from azure.identity import DefaultAzureCredential
 from azure.core.credentials import AccessToken
 
-# Import Dev Box manager (optional — only needed for PROVISION_DEVBOX action)
+# Import Dev Box manager (optional -- only needed for provision_devbox tool)
 try:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from orchestrator_devbox import DevBoxManager
@@ -36,21 +44,22 @@ DATAVERSE_API = f"{DATAVERSE_URL}/api/data/v9.2"
 CONVERSATIONS_TABLE = os.environ.get("CONVERSATIONS_TABLE", "cr_shraga_conversations")
 TASKS_TABLE = os.environ.get("TASKS_TABLE", "cr_shraga_tasks")
 MESSAGES_TABLE = os.environ.get("MESSAGES_TABLE", "cr_shragamessages")
-USER_EMAIL = os.environ.get("USER_EMAIL")  # Required — which user this manager serves
+USER_EMAIL = os.environ.get("USER_EMAIL")  # Required -- which user this manager serves
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "3"))  # seconds
 REQUEST_TIMEOUT = 30
 # Use a faster model for chat responses (latency-sensitive) while workers use the default model
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "")  # e.g., "claude-sonnet-4-5-20250929" for faster chat responses
 
 # Conversation direction (string values in Dataverse)
-DIRECTION_INBOUND = "Inbound"    # user → manager
-DIRECTION_OUTBOUND = "Outbound"  # manager → user
+DIRECTION_INBOUND = "Inbound"    # user -> manager
+DIRECTION_OUTBOUND = "Outbound"  # manager -> user
 
 # Conversation status (string values in Dataverse)
 STATUS_UNCLAIMED = "Unclaimed"
 STATUS_CLAIMED = "Claimed"
 STATUS_PROCESSED = "Processed"
 STATUS_DELIVERED = "Delivered"
+STATUS_EXPIRED = "Expired"  # For stale outbound rows that were never delivered
 
 # Task status codes (match integrated_task_worker.py)
 TASK_PENDING = 1
@@ -71,13 +80,15 @@ TASK_STATUS_NAMES = {
     TASK_CANCELED: "Canceled",
 }
 
+# Single fallback message for when Claude CLI is unavailable
+FALLBACK_MESSAGE = "The system is temporarily unavailable, please try again shortly."
 
 WORKING_DIR = os.environ.get("WORKING_DIR", "")  # Dev box working directory for Claude
 
 
 SESSIONS_FILE = os.environ.get("SESSIONS_FILE", "")  # Override path for session mapping
 
-# Dev Box provisioning configuration (optional — set to enable PROVISION_DEVBOX action)
+# Dev Box provisioning configuration (optional -- set to enable provision_devbox tool)
 DEVCENTER_ENDPOINT = os.environ.get("DEVCENTER_ENDPOINT")
 DEVBOX_PROJECT = os.environ.get("DEVBOX_PROJECT")
 DEVBOX_POOL = os.environ.get("DEVBOX_POOL", "shraga-worker-pool")
@@ -85,7 +96,12 @@ USER_AZURE_AD_ID = os.environ.get("USER_AZURE_AD_ID", "")  # Azure AD object ID 
 
 
 class TaskManager:
-    """Personal Task Manager for a single user."""
+    """Agentic Personal Task Manager for a single user.
+
+    Claude has tools to create tasks, cancel tasks, check status, list tasks,
+    provision dev boxes, and respond to the user.  Claude decides what to do
+    based on the user's message and context -- no hardcoded action parsing.
+    """
 
     def __init__(self, user_email: str, working_dir: str = ""):
         if not user_email:
@@ -96,7 +112,7 @@ class TaskManager:
         self.credential = DefaultAzureCredential()
         self._token_cache = None
         self._token_expires = None
-        # MCS conversation ID → Claude session ID mapping (persisted to disk)
+        # MCS conversation ID -> Claude session ID mapping (persisted to disk)
         self._sessions_path = self._resolve_sessions_path()
         self._sessions: dict[str, str] = self._load_sessions()
 
@@ -211,7 +227,7 @@ class TaskManager:
         row_id = msg.get("cr_shraga_conversationid")
         etag = msg.get("@odata.etag")
         if not row_id or not etag:
-            print(f"[WARN] Cannot claim message — missing id or etag")
+            print(f"[WARN] Cannot claim message -- missing id or etag")
             return False
 
         headers = self._headers(
@@ -263,11 +279,11 @@ class TaskManager:
         """Write an outbound response to the conversations table."""
         headers = self._headers(content_type="application/json")
         if not headers:
-            print("[ERROR] Cannot send response — no auth token")
+            print("[ERROR] Cannot send response -- no auth token")
             return None
         try:
             body = {
-                "cr_name": text[:200],
+                "cr_name": text[:100],
                 "cr_useremail": self.user_email,
                 "cr_mcs_conversation_id": mcs_conversation_id,
                 "cr_message": text,
@@ -290,10 +306,11 @@ class TaskManager:
     # ── Stale Row Cleanup ─────────────────────────────────────────────
 
     def cleanup_stale_outbound(self, max_age_minutes: int = 10):
-        """Mark old Unclaimed Outbound rows as Delivered to prevent stale data issues.
+        """Mark old Unclaimed Outbound rows as Expired to prevent stale data issues.
 
         Per spec: old unclaimed Outbound rows from testing/crashes can interfere
-        with the isFollowup filter. This marks them as Delivered so they're ignored.
+        with the isFollowup filter. Uses 'Expired' status (not 'Delivered') to
+        distinguish rows that timed out from rows actually delivered to users.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
         cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -327,15 +344,15 @@ class TaskManager:
             try:
                 patch_url = f"{DATAVERSE_API}/{CONVERSATIONS_TABLE}({row_id})"
                 patch_headers = self._headers(content_type="application/json")
-                body = {"cr_status": STATUS_DELIVERED}
+                body = {"cr_status": STATUS_EXPIRED}
                 resp = requests.patch(patch_url, headers=patch_headers, json=body, timeout=REQUEST_TIMEOUT)
                 resp.raise_for_status()
                 cleaned += 1
             except Exception as e:
-                print(f"[CLEANUP] Error marking row {row_id} as Delivered: {e}")
+                print(f"[CLEANUP] Error marking row {row_id} as Expired: {e}")
 
         if cleaned > 0:
-            print(f"[CLEANUP] Marked {cleaned} stale outbound row(s) as Delivered")
+            print(f"[CLEANUP] Marked {cleaned} stale outbound row(s) as Expired")
         return cleaned
 
     # ── Tasks CRUD ────────────────────────────────────────────────────
@@ -347,7 +364,7 @@ class TaskManager:
             return None
         try:
             body = {
-                "cr_name": prompt[:200],  # Task title (primary name column, max 200 chars)
+                "cr_name": prompt[:100],  # Task title (primary name column, max 100 chars in DV)
                 "cr_prompt": prompt,
                 "cr_status": TASK_PENDING,
                 "crb3b_useremail": self.user_email,
@@ -370,7 +387,14 @@ class TaskManager:
                 return {"cr_name": prompt, "cr_shraga_taskid": task_id}
             return resp.json()
         except Exception as e:
-            print(f"[ERROR] create_task: {e}")
+            # Log the full Dataverse error response for debugging
+            error_detail = ""
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_detail = f" | Response: {e.response.text[:500]}"
+                except Exception:
+                    pass
+            print(f"[ERROR] create_task: {e}{error_detail}")
             return None
 
     def wait_for_running_link(self, task_id: str, timeout: int = 18) -> str:
@@ -426,7 +450,7 @@ class TaskManager:
                     f"[SYSTEM UPDATE] The task '{task_title}' was submitted about a minute ago "
                     f"but hasn't started running yet. This could mean the worker is busy, "
                     f"there's a queue, or something went wrong.\n"
-                    f"Send the user a natural follow-up. Keep the conversation going — "
+                    f"Send the user a natural follow-up. Keep the conversation going -- "
                     f"suggest options like checking, retrying, or just waiting a bit longer."
                 )
 
@@ -434,7 +458,7 @@ class TaskManager:
             session_id = self._sessions.get(mcs_conversation_id)
             system_prompt = (
                 "You are following up on a task you helped the user submit. "
-                "Respond directly to the user — no action format needed, just your message."
+                "Respond directly to the user with a brief, natural message."
             )
 
             followup_text, new_session_id = self._call_claude(
@@ -446,21 +470,10 @@ class TaskManager:
                 self._sessions[mcs_conversation_id] = new_session_id
                 self._save_sessions()
 
-            # Strip ACTION format if Claude used it despite instructions
-            if followup_text and "---" in followup_text:
-                parts = followup_text.split("---", 1)
-                if len(parts) > 1 and parts[1].strip():
-                    followup_text = parts[1].strip()
-
             if not followup_text:
-                # Fallback if Claude call fails
-                if deep_link:
-                    followup_text = f"Your task is running! Progress: {deep_link}"
-                else:
-                    followup_text = f"Haven't heard back on '{task_title}' yet. Want me to check?"
+                followup_text = FALLBACK_MESSAGE
 
             # Send the follow-up as a proactive outbound message
-            # Use inbound_row_id (not task_id) so the flow can match by strong ID
             self.send_response(
                 in_reply_to=inbound_row_id,
                 mcs_conversation_id=mcs_conversation_id,
@@ -543,10 +556,138 @@ class TaskManager:
             print(f"[ERROR] get_task_messages: {e}")
             return []
 
-    # ── Message Processing ────────────────────────────────────────────
+    # ── Tool Implementations ─────────────────────────────────────────
+
+    def _tool_create_task(self, prompt: str, description: str = "",
+                          mcs_conversation_id: str = "",
+                          inbound_row_id: str = "") -> dict:
+        """Tool: create a new task."""
+        task = self.create_task(prompt=prompt, description=description)
+        if task:
+            new_task_id = task.get("cr_shraga_taskid", "")
+            # Kick off background monitoring for the Running card
+            if new_task_id and mcs_conversation_id:
+                t = threading.Thread(
+                    target=self._monitor_task_start,
+                    args=(new_task_id, prompt, mcs_conversation_id, inbound_row_id),
+                    daemon=True,
+                )
+                t.start()
+                print(f"[MONITOR] Background thread started for task {new_task_id[:8]}...")
+            return {
+                "success": True,
+                "task_id": new_task_id,
+                "task_name": task.get("cr_name", prompt),
+            }
+        return {"success": False, "error": "Failed to create task in Dataverse"}
+
+    def _tool_cancel_task(self, task_id: str, recent_tasks: list[dict] = None) -> dict:
+        """Tool: cancel a task."""
+        target_id = task_id
+        if target_id == "latest" or not target_id:
+            # Find most recent running task
+            for t in (recent_tasks or []):
+                if t.get("cr_status") == TASK_RUNNING:
+                    target_id = t.get("cr_shraga_taskid")
+                    break
+        if target_id and target_id != "latest":
+            ok = self.cancel_task(target_id)
+            return {"success": ok, "task_id": target_id}
+        return {"success": False, "error": "No running task found to cancel"}
+
+    def _tool_check_task_status(self, task_id: str) -> dict:
+        """Tool: check status of a specific task."""
+        task = self.get_task(task_id)
+        if task:
+            status_code = task.get("cr_status")
+            return {
+                "task_id": task_id,
+                "status": TASK_STATUS_NAMES.get(status_code, "Unknown"),
+                "status_code": status_code,
+                "name": task.get("cr_name", ""),
+                "result": (task.get("cr_result") or "")[:500],
+            }
+        return {"error": f"Task {task_id} not found"}
+
+    def _tool_list_recent_tasks(self) -> dict:
+        """Tool: list recent tasks."""
+        tasks = self.list_tasks(top=5)
+        return {
+            "tasks": [
+                {
+                    "task_id": t.get("cr_shraga_taskid", ""),
+                    "name": t.get("cr_name", ""),
+                    "status": TASK_STATUS_NAMES.get(t.get("cr_status"), "Unknown"),
+                    "created": t.get("createdon", "")[:19],
+                }
+                for t in tasks
+            ]
+        }
+
+    def _tool_provision_devbox(self) -> dict:
+        """Tool: provision a new dev box for this user."""
+        if not DEVBOX_AVAILABLE:
+            return {"error": "Dev box provisioning module not available."}
+        if not DEVCENTER_ENDPOINT or not DEVBOX_PROJECT:
+            return {"error": "Dev box provisioning not configured."}
+        if not USER_AZURE_AD_ID:
+            return {"error": "Azure AD ID not configured."}
+
+        try:
+            devbox_mgr = DevBoxManager(
+                devcenter_endpoint=DEVCENTER_ENDPOINT,
+                project_name=DEVBOX_PROJECT,
+                pool_name=DEVBOX_POOL,
+                use_device_code=False,
+            )
+            result = devbox_mgr.provision_devbox(
+                user_azure_ad_id=USER_AZURE_AD_ID,
+                user_email=self.user_email,
+            )
+            devbox_name = result.get("name", "unknown")
+            return {
+                "success": True,
+                "devbox_name": devbox_name,
+                "provisioning_state": result.get("provisioningState", "Unknown"),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _execute_tool(self, tool_name: str, tool_args: dict,
+                      msg_context: dict) -> dict:
+        """Dispatch a tool call and return the result."""
+        mcs_conv_id = msg_context.get("mcs_conv_id", "")
+        inbound_row_id = msg_context.get("inbound_row_id", "")
+        recent_tasks = msg_context.get("recent_tasks", [])
+
+        if tool_name == "create_task":
+            return self._tool_create_task(
+                prompt=tool_args.get("prompt", ""),
+                description=tool_args.get("description", ""),
+                mcs_conversation_id=mcs_conv_id,
+                inbound_row_id=inbound_row_id,
+            )
+        elif tool_name == "cancel_task":
+            return self._tool_cancel_task(
+                task_id=tool_args.get("task_id", ""),
+                recent_tasks=recent_tasks,
+            )
+        elif tool_name == "check_task_status":
+            return self._tool_check_task_status(
+                task_id=tool_args.get("task_id", ""),
+            )
+        elif tool_name == "list_recent_tasks":
+            return self._tool_list_recent_tasks()
+        elif tool_name == "provision_devbox":
+            return self._tool_provision_devbox()
+        else:
+            return {"error": f"Unknown tool: {tool_name}"}
+
+    # ── Message Processing (Agentic) ──────────────────────────────────
 
     def process_message(self, msg: dict):
-        """Process a single inbound message. Uses Claude to understand intent and respond."""
+        """Process a single inbound message. Uses Claude with tools to understand
+        intent and take action."""
         row_id = msg.get("cr_shraga_conversationid")
         mcs_conv_id = msg.get("cr_mcs_conversation_id", "")
         user_text = msg.get("cr_message", "").strip()
@@ -597,61 +738,57 @@ class TaskManager:
         return "\n".join(lines)
 
     def _ask_claude(self, user_text: str, context: str, recent_tasks: list[dict],
-                    mcs_conversation_id: str = "", inbound_row_id: str = "") -> str:
+                    mcs_conversation_id: str = "", inbound_row_id: str = "") -> tuple[str, bool]:
         """Use Claude CLI to process the user's message and return a response.
 
-        Maintains conversation sessions per MCS conversation ID so Claude has
-        full conversation history. Uses --output-format json to capture session IDs
-        and --resume to continue existing sessions.
+        Claude has tools available and decides what action to take.  The response
+        format is JSON with either a tool_calls array or a final response.
 
-        Returns the response text to send back to the user.
+        Returns (response_text, followup_expected).
         """
-        system_prompt = f"""You are a task management assistant for a developer. You help them create coding tasks, check task status, cancel tasks, and answer questions about their work.
+        tool_descriptions = (
+            "Available tools (call via JSON):\n"
+            "- create_task(prompt, description): Create a new coding task. "
+            "A background process monitors it and sends a follow-up with the progress link.\n"
+            "- cancel_task(task_id): Cancel a task. Use 'latest' for the most recent running task.\n"
+            "- check_task_status(task_id): Get current status of a specific task.\n"
+            "- list_recent_tasks(): List the user's recent tasks.\n"
+            "- provision_devbox(): Provision a new dev box for the user.\n"
+        )
 
-Current state:
-{context}
-
-Dev box: {platform.node()}
-Working directory: {self.working_dir or 'not configured'}
-
-IMPORTANT: You must respond with EXACTLY ONE of these action formats, followed by your message to the user.
-
-ACTION FORMATS:
-
-1. To create a task:
-   ACTION: CREATE_TASK
-   TITLE: <concise task title>
-   DESCRIPTION: <detailed description of what to do>
-   ---
-   <your message confirming the task was submitted. Do NOT say "created" — say "submitted". A background process will monitor it and send the user a follow-up with the live progress link once the task starts running. So your message should be something like "Submitted! I'll send you the progress link once it starts running.">
-
-2. To cancel a task (cancel the most recent running task, or a specific one):
-   ACTION: CANCEL_TASK
-   TASK_ID: <task id to cancel, or "latest" for the most recent running task>
-   ---
-   <your message to the user confirming cancellation>
-
-3. To just respond (status check, questions, general chat):
-   ACTION: RESPOND
-   ---
-   <your response to the user>
-
-4. To provision a new dev box (when user asks for a new dev box, additional dev box, etc.):
-   ACTION: PROVISION_DEVBOX
-   ---
-   <your message to the user acknowledging the request>
-
-Keep responses concise and conversational. Be friendly but professional."""
+        system_prompt = (
+            f"You are a task management assistant for a developer. You help them "
+            f"create coding tasks, check task status, cancel tasks, and answer "
+            f"questions about their work.\n\n"
+            f"Current state:\n{context}\n\n"
+            f"Dev box: {platform.node()}\n"
+            f"Working directory: {self.working_dir or 'not configured'}\n\n"
+            f"{tool_descriptions}\n"
+            f"Respond with JSON. Either:\n"
+            f'  {{"response": "your message", "followup_expected": true/false}}\n'
+            f"or:\n"
+            f'  {{"tool_calls": [{{"name": "tool_name", "arguments": {{...}}}}]}}\n\n'
+            f"After tool results come back, provide your final response.\n"
+            f"Set followup_expected=true when you created a task (the monitor will "
+            f"send a progress link later).\n\n"
+            f"Keep responses concise and conversational. Be friendly but professional."
+        )
 
         session_id = self._sessions.get(mcs_conversation_id) if mcs_conversation_id else None
         session_lost = False
+
+        msg_context = {
+            "mcs_conv_id": mcs_conversation_id,
+            "inbound_row_id": inbound_row_id,
+            "recent_tasks": recent_tasks,
+        }
 
         try:
             response_text, new_session_id = self._call_claude(
                 user_text, system_prompt, session_id=session_id,
             )
 
-            # If resume failed, the call returns None — retry without resume
+            # If resume failed, retry without resume
             if response_text is None and session_id:
                 print(f"[SESSIONS] Resume failed for {session_id[:8]}..., starting fresh")
                 self._forget_session(mcs_conversation_id)
@@ -661,7 +798,7 @@ Keep responses concise and conversational. Be friendly but professional."""
                 )
 
             if response_text is None:
-                return self._fallback_process(user_text, recent_tasks), False
+                return FALLBACK_MESSAGE, False
 
             # Persist new session mapping
             if new_session_id and mcs_conversation_id:
@@ -671,11 +808,9 @@ Keep responses concise and conversational. Be friendly but professional."""
                 if is_new:
                     print(f"[SESSIONS] New session {new_session_id[:8]}... for {mcs_conversation_id[:20]}...")
 
-            # Execute the action from Claude's response
-            result, followup_expected = self._execute_action(
-                response_text, recent_tasks,
-                mcs_conversation_id=mcs_conversation_id,
-                inbound_row_id=inbound_row_id,
+            # Process Claude's response -- could be JSON with tools or plain text
+            result, followup_expected = self._process_claude_response(
+                response_text, msg_context, system_prompt,
             )
 
             # Prepend lost-session notice if applicable
@@ -689,13 +824,101 @@ Keep responses concise and conversational. Be friendly but professional."""
 
         except subprocess.TimeoutExpired:
             print("[WARN] Claude CLI timed out")
-            return self._fallback_process(user_text, recent_tasks), False
+            return FALLBACK_MESSAGE, False
         except FileNotFoundError:
             print("[WARN] Claude CLI not found, using fallback")
-            return self._fallback_process(user_text, recent_tasks), False
+            return FALLBACK_MESSAGE, False
         except Exception as e:
             print(f"[ERROR] _ask_claude: {e}")
-            return self._fallback_process(user_text, recent_tasks), False
+            return FALLBACK_MESSAGE, False
+
+    def _process_claude_response(self, response_text: str, msg_context: dict,
+                                 system_prompt: str,
+                                 max_rounds: int = 3) -> tuple[str, bool]:
+        """Process Claude's response, executing tools if requested.
+
+        Returns (final_text, followup_expected).
+        """
+        for _round in range(max_rounds):
+            parsed = self._try_parse_json(response_text)
+
+            if parsed is None:
+                # Plain text response -- use as-is
+                return response_text, False
+
+            # Check for final response
+            if "response" in parsed:
+                followup = parsed.get("followup_expected", False)
+                return parsed["response"], followup
+
+            # Execute tool calls
+            tool_calls = parsed.get("tool_calls", [])
+            if not tool_calls:
+                # No tools and no response -- use raw text
+                return response_text, False
+
+            tool_results = []
+            created_task = False
+            for tc in tool_calls:
+                name = tc.get("name", "")
+                args = tc.get("arguments", {})
+                print(f"[TOOL] Executing: {name}({json.dumps(args)[:100]})")
+                result = self._execute_tool(name, args, msg_context)
+                tool_results.append({"tool": name, "result": result})
+                print(f"[TOOL] Result: {json.dumps(result)[:200]}")
+                if name == "create_task" and result.get("success"):
+                    created_task = True
+
+            # Feed results back to Claude for the next round
+            followup_prompt = (
+                f"Tool results:\n{json.dumps(tool_results, default=str)}\n\n"
+                f"Provide your final response to the user as JSON:\n"
+                f'  {{"response": "your message", "followup_expected": {str(created_task).lower()}}}'
+            )
+
+            next_response, _ = self._call_claude(
+                followup_prompt, system_prompt, session_id=None,
+            )
+            if next_response is None:
+                # Claude failed on follow-up -- construct a basic response
+                if created_task:
+                    return "Task submitted. I will send you a progress link once it starts running.", True
+                return FALLBACK_MESSAGE, False
+
+            response_text = next_response
+
+        # Exhausted rounds -- return whatever we have
+        return response_text, False
+
+    def _try_parse_json(self, text: str) -> dict | None:
+        """Try to parse text as JSON. Returns None if not valid JSON.
+
+        Handles several common Claude response patterns:
+        - Pure JSON: {"response": "..."}
+        - Markdown code blocks: ```json\n{...}\n```
+        - Mixed text + JSON: "Some text\n\n{"tool_calls": [...]}"
+        """
+        text = text.strip()
+        # Handle markdown code blocks
+        if text.startswith("```"):
+            lines = text.split("\n")
+            inner = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+            text = inner.strip()
+        # Try parsing the full text first
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # Try extracting JSON object from within the text (Claude sometimes
+        # prefixes JSON with explanatory text)
+        brace_idx = text.find("{")
+        if brace_idx > 0:
+            candidate = text[brace_idx:]
+            try:
+                return json.loads(candidate)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return None
 
     def _call_claude(self, user_text: str, system_prompt: str,
                      session_id: str | None = None) -> tuple[str | None, str]:
@@ -738,7 +961,7 @@ Keep responses concise and conversational. Be friendly but professional."""
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
-            # Non-JSON response — treat as plain text
+            # Non-JSON response -- treat as plain text
             print(f"[WARN] Non-JSON response from Claude CLI")
             return raw, ""
 
@@ -750,128 +973,9 @@ Keep responses concise and conversational. Be friendly but professional."""
 
         return data.get("result", ""), data.get("session_id", "")
 
-    def _execute_action(self, claude_response: str, recent_tasks: list[dict],
-                        mcs_conversation_id: str = "",
-                        inbound_row_id: str = "") -> tuple[str, bool]:
-        """Parse Claude's action response and execute it.
-        Returns (response_text, followup_expected)."""
-        lines = claude_response.split("\n")
-
-        action = None
-        title = None
-        description = None
-        task_id = None
-        message_lines = []
-        in_message = False
-
-        for line in lines:
-            stripped = line.strip()
-            if stripped == "---":
-                in_message = True
-                continue
-            if in_message:
-                message_lines.append(line)
-                continue
-            if stripped.startswith("ACTION:"):
-                action = stripped.split(":", 1)[1].strip()
-            elif stripped.startswith("TITLE:"):
-                title = stripped.split(":", 1)[1].strip()
-            elif stripped.startswith("DESCRIPTION:"):
-                description = stripped.split(":", 1)[1].strip()
-            elif stripped.startswith("TASK_ID:"):
-                task_id = stripped.split(":", 1)[1].strip()
-
-        user_message = "\n".join(message_lines).strip()
-
-        if action == "CREATE_TASK" and title:
-            task = self.create_task(prompt=title, description=description or "")
-            if task:
-                new_task_id = task.get("cr_shraga_taskid", "")
-
-                # Kick off background monitoring for the Running card
-                if new_task_id and mcs_conversation_id:
-                    t = threading.Thread(
-                        target=self._monitor_task_start,
-                        args=(new_task_id, title, mcs_conversation_id, inbound_row_id),
-                        daemon=True,
-                    )
-                    t.start()
-                    print(f"[MONITOR] Background thread started for task {new_task_id[:8]}...")
-
-                return user_message, True  # followup expected
-            else:
-                return user_message, False
-
-        elif action == "CANCEL_TASK":
-            target_id = task_id
-            if target_id == "latest" or not target_id:
-                for t in recent_tasks:
-                    if t.get("cr_status") == TASK_RUNNING:
-                        target_id = t.get("cr_shraga_taskid")
-                        break
-            if target_id and target_id != "latest":
-                self.cancel_task(target_id)
-            return user_message, False
-
-        elif action == "PROVISION_DEVBOX":
-            result = self._handle_provision_devbox()
-            # If handler returned a message, use it; otherwise fall back to Claude's message
-            return (result or user_message or claude_response), False
-
-        else:
-            # RESPOND or unparseable — just pass through Claude's message
-            return (user_message or claude_response), False
-
-    def _handle_provision_devbox(self) -> str:
-        """Handle the PROVISION_DEVBOX action.
-
-        Checks if DevBoxManager is configured, then provisions a new dev box
-        for the current user. Returns a status message string.
-        """
-        if not DEVBOX_AVAILABLE:
-            print("[DEVBOX] orchestrator_devbox module not available")
-            return "Dev box provisioning is not configured on this instance. Please contact your admin."
-
-        if not DEVCENTER_ENDPOINT or not DEVBOX_PROJECT:
-            print("[DEVBOX] Missing DEVCENTER_ENDPOINT or DEVBOX_PROJECT env vars")
-            return "Dev box provisioning is not configured. Please contact your admin to set up the required environment variables."
-
-        if not USER_AZURE_AD_ID:
-            print("[DEVBOX] Missing USER_AZURE_AD_ID env var")
-            return "Dev box provisioning requires your Azure AD ID to be configured. Please contact your admin."
-
-        try:
-            devbox_mgr = DevBoxManager(
-                devcenter_endpoint=DEVCENTER_ENDPOINT,
-                project_name=DEVBOX_PROJECT,
-                pool_name=DEVBOX_POOL,
-                use_device_code=False,
-            )
-            print(f"[DEVBOX] Starting provisioning for {self.user_email}...")
-
-            result = devbox_mgr.provision_devbox(
-                user_azure_ad_id=USER_AZURE_AD_ID,
-                user_email=self.user_email,
-            )
-
-            devbox_name = result.get("name", "unknown")
-            provisioning_state = result.get("provisioningState", "Unknown")
-            print(f"[DEVBOX] Provisioning started: {devbox_name} (state: {provisioning_state})")
-
-            return (
-                f"Dev box provisioning has been started. "
-                f"Box name: **{devbox_name}** (current state: {provisioning_state}). "
-                f"This usually takes a few minutes. I'll let you know once it's ready, "
-                f"or you can ask me for a status update."
-            )
-
-        except Exception as e:
-            print(f"[ERROR] _handle_provision_devbox: {e}")
-            return f"Something went wrong while provisioning the dev box: {e}"
-
     def _fallback_process(self, user_text: str, recent_tasks: list[dict]) -> str:
         """Minimal fallback when Claude CLI is completely unavailable."""
-        return "The worker on your dev box is not responding right now. It may need to be restarted. Please try again shortly or contact support if this persists."
+        return FALLBACK_MESSAGE
 
     # ── Main Loop ─────────────────────────────────────────────────────
 
@@ -903,7 +1007,7 @@ Keep responses concise and conversational. Be friendly but professional."""
                                 self.send_response(
                                     in_reply_to=row_id,
                                     mcs_conversation_id=msg.get("cr_mcs_conversation_id", ""),
-                                    text="Something went wrong on my end. Please try again.",
+                                    text=FALLBACK_MESSAGE,
                                 )
                                 self.mark_processed(row_id)
                             except Exception:

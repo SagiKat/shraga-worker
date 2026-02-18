@@ -413,6 +413,22 @@ class TestApplyCustomizations:
 
     @patch("orchestrator_devbox.DefaultAzureCredential")
     @patch("orchestrator_devbox.requests.put")
+    def test_apply_409_already_exists_treated_as_success(self, mock_put, mock_cred):
+        mock_cred_inst = MagicMock()
+        mock_cred_inst.get_token.return_value = MagicMock(token="fake-token")
+        mock_cred.return_value = mock_cred_inst
+
+        mock_put.return_value = MagicMock(
+            status_code=409,
+            text="A Customization Group with name shraga-setup already exists."
+        )
+
+        mgr = DevBoxManager("https://dc.example.com", "proj", "pool")
+        result = mgr.apply_customizations("uid", "box")
+        assert result["status"] == "AlreadyExists"
+
+    @patch("orchestrator_devbox.DefaultAzureCredential")
+    @patch("orchestrator_devbox.requests.put")
     def test_apply_failure_raises(self, mock_put, mock_cred):
         mock_cred_inst = MagicMock()
         mock_cred_inst.get_token.return_value = MagicMock(token="fake-token")

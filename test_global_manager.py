@@ -1,7 +1,7 @@
 """
-Tests for Global Manager (fallback handler).
+Tests for Global Manager (agentic fallback handler).
 
-All external dependencies (Azure, Dataverse) are mocked.
+All external dependencies (Azure, Dataverse, Claude CLI) are mocked.
 """
 import json
 import sys
@@ -152,29 +152,35 @@ class TestResponse:
         assert manager.send_response("id", "conv", "email", "text") is None
 
 
-# -- Message Processing Tests -------------------------------------------------
+# -- Agentic Message Processing Tests ----------------------------------------
 
 class TestProcessMessage:
     @patch("global_manager.requests.post")
     @patch("global_manager.requests.patch")
-    def test_process_new_user(self, mock_patch, mock_post, manager):
+    def test_process_uses_claude_and_sends_response(self, mock_patch, mock_post, manager):
+        """Claude is called and its response is sent to the user."""
         mock_post.return_value = FakeResponse(json_data={})
         mock_patch.return_value = FakeResponse(status_code=204)
-        manager.process_message(SAMPLE_STALE_MSG)
-        # DevCenter env vars are not set, so provisioning is not configured;
-        # the user should get the "not configured" fallback response.
+
+        with patch.object(manager, "_call_claude_with_tools", return_value="Hello! I can help you."):
+            manager.process_message(SAMPLE_STALE_MSG)
+
+        # Response was sent
         body = mock_post.call_args[1]["json"]
-        assert "provisioning isn't configured" in body["cr_message"].lower()
+        assert body["cr_message"] == "Hello! I can help you."
 
     @patch("global_manager.requests.post")
     @patch("global_manager.requests.patch")
-    def test_process_known_user_offline(self, mock_patch, mock_post, manager):
+    def test_process_fallback_when_claude_unavailable(self, mock_patch, mock_post, manager):
+        """When Claude is unavailable, the single fallback message is sent."""
         mock_post.return_value = FakeResponse(json_data={})
         mock_patch.return_value = FakeResponse(status_code=204)
-        manager._known_users.add("newuser@example.com")
-        manager.process_message(SAMPLE_STALE_MSG)
+
+        with patch.object(manager, "_call_claude_with_tools", return_value=None):
+            manager.process_message(SAMPLE_STALE_MSG)
+
         body = mock_post.call_args[1]["json"]
-        assert "offline" in body["cr_message"].lower()
+        assert body["cr_message"] == "The system is temporarily unavailable, please try again shortly."
 
     @patch("global_manager.requests.patch")
     def test_process_empty_message(self, mock_patch, manager):
@@ -183,12 +189,11 @@ class TestProcessMessage:
         manager.process_message(empty_msg)
         mock_patch.assert_called_once()
 
-    def test_new_user_added_to_known(self, manager):
-        """When DevBox isn't configured, new users are handled gracefully
-        but are NOT added to _known_users (that only happens after full
-        onboarding with successful auth)."""
+    def test_new_user_not_added_to_known_without_tool_call(self, manager):
+        """Users are NOT added to _known_users unless mark_user_onboarded tool is called."""
         with patch.object(manager, "send_response"), \
-             patch.object(manager, "mark_processed"):
+             patch.object(manager, "mark_processed"), \
+             patch.object(manager, "_call_claude_with_tools", return_value="I can help."):
             manager.process_message(SAMPLE_STALE_MSG)
         assert "newuser@example.com" not in manager._known_users
 
@@ -239,45 +244,10 @@ class TestResolveAzureAdId:
             manager.resolve_azure_ad_id("noid@example.com")
 
 
-# -- Onboarding with AAD Resolution Tests ------------------------------------
+# -- Tool Implementation Tests -----------------------------------------------
 
-class TestOnboardingAadResolution:
-    """Verify that _handle_potentially_new_user resolves the real AAD GUID
-    via resolve_azure_ad_id before calling provision_devbox."""
-
-    @patch("global_manager.requests.get")
-    @patch("global_manager.requests.post")
-    @patch("global_manager.requests.patch")
-    def test_provision_uses_resolved_guid(self, mock_patch, mock_post, mock_get, manager):
-        # Wire up a DevBoxManager stub
-        mock_devbox = MagicMock()
-        mock_devbox.provision_devbox.return_value = {"name": "shraga-newuser"}
-        manager.devbox_manager = mock_devbox
-
-        # Graph API response for resolve_azure_ad_id
-        mock_get.return_value = FakeResponse(
-            json_data={"id": "real-aad-guid-5678"}
-        )
-
-        # _get_user_state returns None (new user), send_response / _update_user_state
-        mock_post.return_value = FakeResponse(json_data={})
-        mock_patch.return_value = FakeResponse(status_code=204)
-
-        # Stub Claude CLI so welcome message doesn't call real subprocess
-        with patch.object(manager, "_call_claude", return_value=None):
-            result = manager._handle_potentially_new_user(SAMPLE_STALE_MSG)
-
-        # provision_devbox must have been called with the real GUID
-        call_args = mock_devbox.provision_devbox.call_args
-        assert call_args[0][0] == "real-aad-guid-5678"
-        assert "provisioning has started" in result.lower()
-
-
-# -- Customization Integration Tests -----------------------------------------
-
-class TestCustomizationIntegration:
-    """Verify that apply_customizations is called after provisioning succeeds
-    and that customization status is monitored before proceeding to auth."""
+class TestTools:
+    """Test the individual tool implementations directly."""
 
     def _make_manager_with_devbox(self, manager):
         """Helper to attach a mocked DevBoxManager."""
@@ -286,146 +256,101 @@ class TestCustomizationIntegration:
         return mock_devbox
 
     @patch("global_manager.requests.get")
+    def test_tool_get_user_state_found(self, mock_get, manager):
+        mock_get.return_value = FakeResponse(json_data={
+            "value": [{
+                "crb3b_shragauserid": "row-123",
+                "crb3b_onboardingstep": "provisioning",
+                "crb3b_devboxname": "shraga-newuser",
+                "crb3b_azureadid": "aad-guid",
+                "crb3b_connectionurl": "",
+                "crb3b_authurl": "",
+            }]
+        })
+        result = manager._tool_get_user_state("newuser@example.com")
+        assert result["found"] is True
+        assert result["onboarding_step"] == "provisioning"
+
+    @patch("global_manager.requests.get")
+    def test_tool_get_user_state_not_found(self, mock_get, manager):
+        mock_get.return_value = FakeResponse(json_data={"value": []})
+        result = manager._tool_get_user_state("unknown@example.com")
+        assert result["found"] is False
+
+    @patch("global_manager.requests.get")
     @patch("global_manager.requests.post")
     @patch("global_manager.requests.patch")
-    def test_apply_customizations_called_after_provisioning_succeeds(
-        self, mock_patch, mock_post, mock_get, manager
-    ):
+    def test_tool_provision_devbox(self, mock_patch, mock_post, mock_get, manager):
         mock_devbox = self._make_manager_with_devbox(manager)
+        mock_devbox.provision_devbox.return_value = {"name": "shraga-newuser"}
 
-        # Simulate: provisioning already started, dev box now Succeeded
-        manager._onboarding_state["newuser@example.com"] = {
-            "provisioning_started": True,
-            "devbox_name": "shraga-newuser",
-            "azure_ad_id": "aad-guid-999",
-        }
+        # Graph API for resolve_azure_ad_id
+        mock_get.return_value = FakeResponse(json_data={"id": "real-aad-guid-5678"})
+        mock_post.return_value = FakeResponse(json_data={})
+        mock_patch.return_value = FakeResponse(status_code=204)
 
+        result = manager._tool_provision_devbox("newuser@example.com")
+        assert result["success"] is True
+        assert result["devbox_name"] == "shraga-newuser"
+        mock_devbox.provision_devbox.assert_called_once()
+        # Verify it used the resolved GUID
+        call_args = mock_devbox.provision_devbox.call_args
+        assert call_args[0][0] == "real-aad-guid-5678"
+
+    def test_tool_provision_devbox_not_configured(self, manager):
+        """Returns error when devbox_manager is None."""
+        result = manager._tool_provision_devbox("newuser@example.com")
+        assert "error" in result
+
+    def test_tool_check_devbox_status(self, manager):
+        mock_devbox = self._make_manager_with_devbox(manager)
         mock_devbox.get_devbox_status.return_value = DevBoxInfo(
             name="shraga-newuser",
-            user_id="aad-guid-999",
+            user_id="aad-guid",
             status="Running",
             connection_url="https://devbox.microsoft.com/connect?devbox=shraga-newuser",
             provisioning_state="Succeeded",
         )
+        result = manager._tool_check_devbox_status("shraga-newuser", "aad-guid")
+        assert result["provisioning_state"] == "Succeeded"
+        assert "devbox.microsoft.com" in result["connection_url"]
+
+    def test_tool_apply_customizations(self, manager):
+        mock_devbox = self._make_manager_with_devbox(manager)
         mock_devbox.apply_customizations.return_value = {"status": "Running"}
+        result = manager._tool_apply_customizations("shraga-newuser", "aad-guid")
+        assert result["success"] is True
 
-        # Stub external calls
-        mock_post.return_value = FakeResponse(json_data={})
-        mock_patch.return_value = FakeResponse(status_code=204)
-        mock_get.return_value = FakeResponse(json_data={"value": []})
-
-        with patch.object(manager, "_call_claude", return_value=None):
-            manager._handle_potentially_new_user(SAMPLE_STALE_MSG)
-
-        mock_devbox.apply_customizations.assert_called_once_with(
-            "aad-guid-999", "shraga-newuser",
-        )
-
-    @patch("global_manager.requests.get")
-    @patch("global_manager.requests.post")
-    @patch("global_manager.requests.patch")
-    def test_customization_still_running_returns_status_message(
-        self, mock_patch, mock_post, mock_get, manager
-    ):
+    def test_tool_check_customization_status(self, manager):
         mock_devbox = self._make_manager_with_devbox(manager)
-
-        # State: provisioning done, customization started but not complete
-        manager._onboarding_state["newuser@example.com"] = {
-            "provisioning_started": True,
-            "provisioning_complete": True,
-            "customization_started": True,
-            "devbox_name": "shraga-newuser",
-            "azure_ad_id": "aad-guid-999",
-        }
-
-        mock_devbox.get_customization_status.return_value = {"status": "Running"}
-        mock_post.return_value = FakeResponse(json_data={})
-        mock_patch.return_value = FakeResponse(status_code=204)
-        mock_get.return_value = FakeResponse(json_data={"value": []})
-
-        result = manager._handle_potentially_new_user(SAMPLE_STALE_MSG)
-        assert "customized" in result.lower() or "installing" in result.lower()
-        assert "Running" in result
-
-    @patch("global_manager.requests.get")
-    @patch("global_manager.requests.post")
-    @patch("global_manager.requests.patch")
-    def test_customization_succeeded_proceeds_to_rdp_auth(
-        self, mock_patch, mock_post, mock_get, manager
-    ):
-        """After customization succeeds, the GM sends an RDP link for auth
-        instead of running claude /login locally."""
-        mock_devbox = self._make_manager_with_devbox(manager)
-
-        manager._onboarding_state["newuser@example.com"] = {
-            "provisioning_started": True,
-            "provisioning_complete": True,
-            "customization_started": True,
-            "devbox_name": "shraga-newuser",
-            "azure_ad_id": "aad-guid-999",
-            "connection_url": "https://devbox.microsoft.com/connect?devbox=shraga-newuser",
-        }
-
         mock_devbox.get_customization_status.return_value = {"status": "Succeeded"}
-        mock_post.return_value = FakeResponse(json_data={})
-        mock_patch.return_value = FakeResponse(status_code=204)
-        mock_get.return_value = FakeResponse(json_data={"value": []})
+        result = manager._tool_check_customization_status("shraga-newuser", "aad-guid")
+        assert result["status"] == "Succeeded"
 
-        with patch.object(manager, "_call_claude", return_value=None), \
-             patch("global_manager.DeviceCodeCredential", autospec=True) as mock_dc:
-            # Mock the device code credential to simulate successful auth
-            mock_token = type("Token", (), {"token": "fake-token", "expires_on": 9999999999})()
-            mock_dc.return_value.get_token.return_value = mock_token
-            result = manager._handle_potentially_new_user(SAMPLE_STALE_MSG)
+    def test_tool_get_rdp_auth_message(self, manager):
+        result = manager._tool_get_rdp_auth_message(
+            "https://devbox.microsoft.com/connect?devbox=shraga-newuser"
+        )
+        msg = result["message"]
+        assert "devbox.microsoft.com" in msg
+        assert "claude /login" in msg
+        assert "pip install" in msg
+        assert "shraga-worker" in msg
 
-        # After successful device code auth, result should indicate completion
-        result_lower = result.lower()
-        assert any(w in result_lower for w in ("ready", "complete", "active", "authentication"))
-        # It must NOT spawn a local process -- the message should instruct
-        # the user to run claude /login on the dev box via RDP
-        assert "claude /login" in result
-        # The onboarding step should be auth_pending
-        state = manager._onboarding_state.get("newuser@example.com", {})
-        assert state.get("onboarding_step") == "auth_pending_rdp"
-
-    @patch("global_manager.requests.get")
-    @patch("global_manager.requests.post")
     @patch("global_manager.requests.patch")
-    def test_customization_failed_still_proceeds_to_rdp_auth(
-        self, mock_patch, mock_post, mock_get, manager
-    ):
-        mock_devbox = self._make_manager_with_devbox(manager)
-
-        manager._onboarding_state["newuser@example.com"] = {
-            "provisioning_started": True,
-            "provisioning_complete": True,
-            "customization_started": True,
-            "devbox_name": "shraga-newuser",
-            "azure_ad_id": "aad-guid-999",
-            "connection_url": "https://devbox.microsoft.com/connect?devbox=shraga-newuser",
-        }
-
-        mock_devbox.get_customization_status.return_value = {"status": "Failed"}
-        mock_post.return_value = FakeResponse(json_data={})
-        mock_patch.return_value = FakeResponse(status_code=204)
+    @patch("global_manager.requests.get")
+    def test_tool_mark_user_onboarded(self, mock_get, mock_patch, manager):
         mock_get.return_value = FakeResponse(json_data={"value": []})
-
-        with patch.object(manager, "_call_claude", return_value=None), \
-             patch("global_manager.DeviceCodeCredential", autospec=True) as mock_dc:
-            mock_token = type("Token", (), {"token": "fake-token", "expires_on": 9999999999})()
-            mock_dc.return_value.get_token.return_value = mock_token
-            result = manager._handle_potentially_new_user(SAMPLE_STALE_MSG)
-
-        # Should still proceed to auth even when customization fails
-        result_lower = result.lower()
-        assert any(w in result_lower for w in ("ready", "complete", "active", "authentication"))
+        mock_patch.return_value = FakeResponse(status_code=204)
+        result = manager._tool_mark_user_onboarded("newuser@example.com")
+        assert result["success"] is True
+        assert "newuser@example.com" in manager._known_users
 
 
-# -- RDP Auth Flow Tests (BLOCKER 3 fix) -------------------------------------
+# -- Agentic Onboarding Integration Tests ------------------------------------
 
-class TestRdpAuthFlow:
-    """Verify that _handle_potentially_new_user sends the user a device code
-    for auth (primary) or RDP link (fallback)."""
+class TestAgenticOnboarding:
+    """Verify the agentic flow works end-to-end with mocked Claude."""
 
     def _make_manager_with_devbox(self, manager):
         mock_devbox = MagicMock()
@@ -435,204 +360,114 @@ class TestRdpAuthFlow:
     @patch("global_manager.requests.get")
     @patch("global_manager.requests.post")
     @patch("global_manager.requests.patch")
-    def test_auth_step_sends_rdp_link_not_local_auth(
-        self, mock_patch, mock_post, mock_get, manager
-    ):
-        """Step 3 should send the user a web RDP URL, not spawn local
-        claude /login on the GM."""
-        self._make_manager_with_devbox(manager)
+    def test_claude_can_provision_via_tools(self, mock_patch, mock_post, mock_get, manager):
+        """Simulate Claude calling the provision_devbox tool."""
+        mock_devbox = self._make_manager_with_devbox(manager)
+        mock_devbox.provision_devbox.return_value = {"name": "shraga-newuser"}
 
-        # State: provisioning and customization complete, ready for auth
-        manager._onboarding_state["newuser@example.com"] = {
-            "provisioning_started": True,
-            "provisioning_complete": True,
-            "customization_started": True,
-            "customization_complete": True,
-            "devbox_name": "shraga-newuser",
-            "azure_ad_id": "aad-guid-999",
-            "connection_url": "https://devbox.microsoft.com/connect?devbox=shraga-newuser",
-        }
-
+        mock_get.return_value = FakeResponse(json_data={"id": "real-aad-guid"})
         mock_post.return_value = FakeResponse(json_data={})
         mock_patch.return_value = FakeResponse(status_code=204)
-        mock_get.return_value = FakeResponse(json_data={"value": []})
 
-        with patch.object(manager, "_call_claude", return_value=None):
-            result = manager._handle_potentially_new_user(SAMPLE_STALE_MSG)
+        # Simulate Claude: first call returns a tool_call, second returns final response
+        call_count = [0]
+        def mock_claude(text, system_prompt):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Claude decides to provision
+                return json.dumps({
+                    "tool_calls": [{"name": "provision_devbox", "arguments": {"user_email": "newuser@example.com"}}]
+                })
+            else:
+                # Claude composes a response after seeing tool result
+                return json.dumps({
+                    "response": "I have started provisioning your dev box (shraga-newuser). This may take a few minutes."
+                })
 
-        # The response should contain the RDP connection URL
-        assert "devbox.microsoft.com/connect" in result
-        # The response should tell the user to run claude /login on the dev box
-        assert "claude /login" in result
-        # onboarding_step should reflect auth_pending_rdp
-        state = manager._onboarding_state.get("newuser@example.com", {})
-        assert state.get("onboarding_step") == "auth_pending_rdp"
+        with patch.object(manager, "_call_claude", side_effect=mock_claude):
+            result = manager._call_claude_with_tools(
+                "User email: newuser@example.com\nUser message: \"hello\"",
+                "system prompt",
+                {"user_email": "newuser@example.com", "row_id": "r1", "mcs_conv_id": "c1"},
+            )
+
+        assert "shraga-newuser" in result
+        mock_devbox.provision_devbox.assert_called_once()
 
     @patch("global_manager.requests.get")
     @patch("global_manager.requests.post")
     @patch("global_manager.requests.patch")
-    def test_auth_step_includes_setup_instructions(
-        self, mock_patch, mock_post, mock_get, manager
-    ):
-        """The RDP auth message should include post-provisioning setup
-        instructions (pip packages, git clone, scheduled task)."""
-        self._make_manager_with_devbox(manager)
-
-        manager._onboarding_state["newuser@example.com"] = {
-            "provisioning_started": True,
-            "provisioning_complete": True,
-            "customization_started": True,
-            "customization_complete": True,
-            "devbox_name": "shraga-newuser",
-            "azure_ad_id": "aad-guid-999",
-            "connection_url": "https://devbox.microsoft.com/connect?devbox=shraga-newuser",
-        }
-
+    def test_claude_plain_text_response(self, mock_patch, mock_post, mock_get, manager):
+        """When Claude returns plain text (not JSON), it's used directly."""
         mock_post.return_value = FakeResponse(json_data={})
         mock_patch.return_value = FakeResponse(status_code=204)
-        mock_get.return_value = FakeResponse(json_data={"value": []})
 
-        with patch.object(manager, "_call_claude", return_value=None):
-            result = manager._handle_potentially_new_user(SAMPLE_STALE_MSG)
+        with patch.object(manager, "_call_claude", return_value="Hello, welcome!"):
+            result = manager._call_claude_with_tools(
+                "User context",
+                "system prompt",
+                {"user_email": "user@example.com", "row_id": "r1", "mcs_conv_id": "c1"},
+            )
 
-        # Should include the setup script contents
-        assert "pip install" in result
-        assert "shraga-worker" in result
+        assert result == "Hello, welcome!"
 
     @patch("global_manager.requests.get")
     @patch("global_manager.requests.post")
     @patch("global_manager.requests.patch")
-    def test_user_confirms_done_completes_onboarding(
-        self, mock_patch, mock_post, mock_get, manager
-    ):
-        """When the user replies 'done', onboarding completes."""
-        self._make_manager_with_devbox(manager)
-
-        # State: RDP auth link was sent, waiting for confirmation
-        manager._onboarding_state["newuser@example.com"] = {
-            "provisioning_started": True,
-            "provisioning_complete": True,
-            "customization_started": True,
-            "customization_complete": True,
-            "devbox_name": "shraga-newuser",
-            "azure_ad_id": "aad-guid-999",
-            "connection_url": "https://devbox.microsoft.com/connect?devbox=shraga-newuser",
-            "onboarding_step": "auth_pending_rdp",
-        }
-
-        mock_post.return_value = FakeResponse(json_data={})
-        mock_patch.return_value = FakeResponse(status_code=204)
+    def test_mark_onboarded_via_tool(self, mock_patch, mock_post, mock_get, manager):
+        """Claude can mark a user as onboarded via tool."""
         mock_get.return_value = FakeResponse(json_data={"value": []})
+        mock_patch.return_value = FakeResponse(status_code=204)
 
-        # User says "done"
-        done_msg = {**SAMPLE_STALE_MSG, "cr_message": "done"}
+        call_count = [0]
+        def mock_claude(text, system_prompt):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return json.dumps({
+                    "tool_calls": [{"name": "mark_user_onboarded", "arguments": {"user_email": "newuser@example.com"}}]
+                })
+            else:
+                return json.dumps({
+                    "response": "Setup complete! Your personal assistant is ready."
+                })
 
-        with patch.object(manager, "_call_claude", return_value=None):
-            result = manager._handle_potentially_new_user(done_msg)
+        with patch.object(manager, "_call_claude", side_effect=mock_claude):
+            result = manager._call_claude_with_tools(
+                "User context",
+                "system prompt",
+                {"user_email": "newuser@example.com", "row_id": "r1", "mcs_conv_id": "c1"},
+            )
 
-        assert "ready" in result.lower() or "complete" in result.lower()
-        # User should now be in known_users
+        assert "ready" in result.lower()
         assert "newuser@example.com" in manager._known_users
 
     @patch("global_manager.requests.get")
     @patch("global_manager.requests.post")
     @patch("global_manager.requests.patch")
-    def test_user_confirms_yes_completes_onboarding(
-        self, mock_patch, mock_post, mock_get, manager
-    ):
-        """Various confirmation words should be accepted."""
-        self._make_manager_with_devbox(manager)
-
-        manager._onboarding_state["newuser@example.com"] = {
-            "provisioning_started": True,
-            "provisioning_complete": True,
-            "customization_started": True,
-            "customization_complete": True,
-            "devbox_name": "shraga-newuser",
-            "azure_ad_id": "aad-guid-999",
-            "connection_url": "https://devbox.microsoft.com/connect?devbox=shraga-newuser",
-            "onboarding_step": "auth_pending_rdp",
-        }
-
-        mock_post.return_value = FakeResponse(json_data={})
-        mock_patch.return_value = FakeResponse(status_code=204)
+    def test_completed_onboarding_updates_dataverse(self, mock_patch, mock_post, mock_get, manager):
+        """When mark_user_onboarded tool is called, Dataverse is updated."""
         mock_get.return_value = FakeResponse(json_data={"value": []})
-
-        yes_msg = {**SAMPLE_STALE_MSG, "cr_message": "yes"}
-
-        with patch.object(manager, "_call_claude", return_value=None):
-            result = manager._handle_potentially_new_user(yes_msg)
-
-        assert "ready" in result.lower() or "complete" in result.lower()
-        assert "newuser@example.com" in manager._known_users
-
-    @patch("global_manager.requests.get")
-    @patch("global_manager.requests.post")
-    @patch("global_manager.requests.patch")
-    def test_user_sends_unrelated_message_gets_reminder(
-        self, mock_patch, mock_post, mock_get, manager
-    ):
-        """If the user sends something other than 'done', remind them."""
-        self._make_manager_with_devbox(manager)
-
-        manager._onboarding_state["newuser@example.com"] = {
-            "provisioning_started": True,
-            "provisioning_complete": True,
-            "customization_started": True,
-            "customization_complete": True,
-            "devbox_name": "shraga-newuser",
-            "azure_ad_id": "aad-guid-999",
-            "connection_url": "https://devbox.microsoft.com/connect?devbox=shraga-newuser",
-            "onboarding_step": "auth_pending_rdp",
-        }
-
-        mock_post.return_value = FakeResponse(json_data={})
         mock_patch.return_value = FakeResponse(status_code=204)
-        mock_get.return_value = FakeResponse(json_data={"value": []})
-
-        other_msg = {**SAMPLE_STALE_MSG, "cr_message": "what do I do now?"}
-
-        result = manager._handle_potentially_new_user(other_msg)
-
-        # Should remind user about the RDP link and ask them to reply "done"
-        assert "done" in result.lower()
-        assert "claude /login" in result
-        # User should NOT be in known_users yet
-        assert "newuser@example.com" not in manager._known_users
-
-    @patch("global_manager.requests.get")
-    @patch("global_manager.requests.post")
-    @patch("global_manager.requests.patch")
-    def test_completed_onboarding_updates_dataverse_step(
-        self, mock_patch, mock_post, mock_get, manager
-    ):
-        """When auth completes, Dataverse is updated with 'completed' step."""
-        self._make_manager_with_devbox(manager)
-
-        manager._onboarding_state["newuser@example.com"] = {
-            "provisioning_started": True,
-            "provisioning_complete": True,
-            "customization_started": True,
-            "customization_complete": True,
-            "devbox_name": "shraga-newuser",
-            "azure_ad_id": "aad-guid-999",
-            "connection_url": "https://devbox.microsoft.com/connect?devbox=shraga-newuser",
-            "onboarding_step": "auth_pending_rdp",
-            "dv_row_id": "existing-row-id-123",
-        }
-
         mock_post.return_value = FakeResponse(json_data={})
-        mock_patch.return_value = FakeResponse(status_code=204)
-        mock_get.return_value = FakeResponse(json_data={"value": []})
 
-        done_msg = {**SAMPLE_STALE_MSG, "cr_message": "done"}
+        call_count = [0]
+        def mock_claude(text, system_prompt):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return json.dumps({
+                    "tool_calls": [{"name": "mark_user_onboarded", "arguments": {"user_email": "newuser@example.com"}}]
+                })
+            else:
+                return json.dumps({"response": "Done!"})
 
-        with patch.object(manager, "_call_claude", return_value=None):
-            manager._handle_potentially_new_user(done_msg)
+        with patch.object(manager, "_call_claude", side_effect=mock_claude):
+            manager._call_claude_with_tools(
+                "context", "prompt",
+                {"user_email": "newuser@example.com", "row_id": "r1", "mcs_conv_id": "c1"},
+            )
 
-        # Find the PATCH call that updated onboarding step to "completed"
-        # It could be via requests.patch (PATCH to existing row) or
-        # requests.post (POST for new row) depending on dv_row_id cache.
+        # Find the call that updated onboarding step to "completed"
+        # Could be via PATCH (existing row) or POST (new row) depending on cache
         found_completed = False
         for call_obj in mock_patch.call_args_list:
             body = call_obj[1].get("json", {})
@@ -647,34 +482,33 @@ class TestRdpAuthFlow:
                     break
         assert found_completed, "Expected Dataverse update with crb3b_onboardingstep='completed'"
 
-    @patch("global_manager.requests.get")
-    @patch("global_manager.requests.post")
-    @patch("global_manager.requests.patch")
-    def test_rdp_auth_uses_fallback_connection_url(
-        self, mock_patch, mock_post, mock_get, manager
-    ):
-        """When connection_url is not cached, a default is constructed."""
-        self._make_manager_with_devbox(manager)
 
-        # No connection_url in state
-        manager._onboarding_state["newuser@example.com"] = {
-            "provisioning_started": True,
-            "provisioning_complete": True,
-            "customization_started": True,
-            "customization_complete": True,
-            "devbox_name": "shraga-newuser",
-            "azure_ad_id": "aad-guid-999",
-        }
+# -- RDP Auth Message Tests ---------------------------------------------------
 
-        mock_post.return_value = FakeResponse(json_data={})
-        mock_patch.return_value = FakeResponse(status_code=204)
-        mock_get.return_value = FakeResponse(json_data={"value": []})
+class TestRdpAuthMessage:
+    """Verify the RDP auth message tool produces correct content."""
 
-        with patch.object(manager, "_call_claude", return_value=None):
-            result = manager._handle_potentially_new_user(SAMPLE_STALE_MSG)
+    def test_rdp_message_contains_connection_url(self, manager):
+        result = manager._tool_get_rdp_auth_message(
+            "https://devbox.microsoft.com/connect?devbox=shraga-newuser"
+        )
+        assert "devbox.microsoft.com/connect" in result["message"]
 
-        # Should construct a default URL using the devbox name
-        assert "devbox.microsoft.com/connect?devbox=shraga-newuser" in result
+    def test_rdp_message_contains_claude_login(self, manager):
+        result = manager._tool_get_rdp_auth_message("https://example.com")
+        assert "claude /login" in result["message"]
+
+    def test_rdp_message_contains_setup_instructions(self, manager):
+        result = manager._tool_get_rdp_auth_message("https://example.com")
+        msg = result["message"]
+        assert "pip install" in msg
+        assert "shraga-worker" in msg
+
+    def test_rdp_message_fallback_url(self, manager):
+        """When no connection_url is in state, a default can be constructed."""
+        url = "https://devbox.microsoft.com/connect?devbox=shraga-newuser"
+        result = manager._tool_get_rdp_auth_message(url)
+        assert "devbox.microsoft.com/connect?devbox=shraga-newuser" in result["message"]
 
 
 # -- Constructor Tests --------------------------------------------------------
@@ -804,3 +638,40 @@ class TestGetCredential:
         assert "https://microsoft.com/devicelogin" in output
         assert "ABCD1234" in output
         assert "15 minutes" in output  # 900 // 60 = 15
+
+
+# -- JSON Parsing Tests -------------------------------------------------------
+
+class TestJsonParsing:
+    """Test the _try_parse_json helper."""
+
+    def test_valid_json(self, manager):
+        result = manager._try_parse_json('{"response": "hello"}')
+        assert result == {"response": "hello"}
+
+    def test_invalid_json_returns_none(self, manager):
+        result = manager._try_parse_json("This is plain text")
+        assert result is None
+
+    def test_json_in_code_block(self, manager):
+        text = '```json\n{"response": "hello"}\n```'
+        result = manager._try_parse_json(text)
+        assert result == {"response": "hello"}
+
+    def test_empty_string(self, manager):
+        result = manager._try_parse_json("")
+        assert result is None
+
+
+# -- System Prompt Tests -------------------------------------------------------
+
+class TestSystemPrompt:
+    def test_system_prompt_with_devbox_manager(self, manager):
+        manager.devbox_manager = MagicMock()
+        prompt = manager._build_system_prompt("user@example.com", has_devbox_manager=True)
+        assert "provision" in prompt.lower()
+        assert "NOT configured" not in prompt
+
+    def test_system_prompt_without_devbox_manager(self, manager):
+        prompt = manager._build_system_prompt("user@example.com", has_devbox_manager=False)
+        assert "NOT configured" in prompt
