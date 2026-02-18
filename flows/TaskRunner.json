@@ -169,7 +169,7 @@
                                 {
                                   "type": "TextBlock",
                                   "text": "{taskTitle}",
-                                  "size": "Small",
+                                  "size": "Default",
                                   "isSubtle": true,
                                   "spacing": "None",
                                   "wrap": true
@@ -185,7 +185,7 @@
                                   "type": "TextBlock",
                                   "text": "QUEUED",
                                   "color": "Warning",
-                                  "size": "Small",
+                                  "size": "Default",
                                   "weight": "Bolder"
                                 }
                               ],
@@ -202,7 +202,7 @@
                         {
                           "type": "TextBlock",
                           "text": "ACTIVITY LOG",
-                          "size": "Small",
+                          "size": "Default",
                           "isSubtle": true,
                           "weight": "Bolder"
                         },

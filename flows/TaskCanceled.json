@@ -84,7 +84,7 @@
                                   {
                                     "type": "Image",
                                     "url": "https://cdn-icons-png.flaticon.com/512/4712/4712109.png",
-                                    "size": "Small",
+                                    "size": "Medium",
                                     "style": "Person",
                                     "altText": "Shraga Agent"
                                   }
@@ -99,12 +99,12 @@
                                     "type": "TextBlock",
                                     "text": "Shraga Worker",
                                     "weight": "Bolder",
-                                    "size": "Medium"
+                                    "size": "Large"
                                   },
                                   {
                                     "type": "TextBlock",
                                     "text": "{taskTitle}",
-                                    "size": "Small",
+                                    "size": "Default",
                                     "isSubtle": true,
                                     "spacing": "None",
                                     "wrap": true
@@ -120,7 +120,7 @@
                                     "type": "TextBlock",
                                     "text": "KILLED",
                                     "color": "Attention",
-                                    "size": "Small",
+                                    "size": "Default",
                                     "weight": "Bolder"
                                   }
                                 ],
@@ -138,7 +138,7 @@
                             "type": "TextBlock",
                             "text": "Task execution was terminated by user.",
                             "wrap": true,
-                            "size": "Small",
+                            "size": "Default",
                             "isSubtle": true
                           }
                         ]
