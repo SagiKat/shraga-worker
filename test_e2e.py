@@ -284,7 +284,7 @@ class TestE2ETaskProcessing:
         # Mock parse_prompt_with_llm via Popen
         parsed = {
             "task_description": "Create hello world",
-            "contact_rules": "Only when blocked",
+
             "success_criteria": "Script runs"
         }
         mock_popen.return_value = MagicMock(
@@ -336,7 +336,7 @@ class TestE2ETaskProcessing:
 
         parsed = {
             "task_description": "Impossible task",
-            "contact_rules": "Never",
+
             "success_criteria": "N/A"
         }
         mock_popen.return_value = MagicMock(
@@ -567,7 +567,7 @@ class TestE2EFullFlow:
 
             parsed = {
                 "task_description": "Create a calculator app",
-                "contact_rules": "Only when blocked",
+    
                 "success_criteria": "Calculator works"
             }
             worker_popen.return_value = MagicMock(

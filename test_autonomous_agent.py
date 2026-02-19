@@ -23,14 +23,14 @@ class TestSetupProject:
     def test_creates_project_folder(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli = AgentCLI()
-        folder = cli.setup_project("Do something", "Only when blocked", "Tests pass")
+        folder = cli.setup_project("Do something", "Tests pass")
         assert folder.exists()
         assert folder.is_dir()
 
     def test_creates_task_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli = AgentCLI()
-        folder = cli.setup_project("Build API", "Never", "All endpoints work")
+        folder = cli.setup_project("Build API", "All endpoints work")
         task_file = folder / "TASK.md"
         assert task_file.exists()
         content = task_file.read_text(encoding="utf-8")
@@ -40,7 +40,7 @@ class TestSetupProject:
     def test_creates_verification_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli = AgentCLI()
-        folder = cli.setup_project("Task", "Only when blocked", "100% coverage")
+        folder = cli.setup_project("Task", "100% coverage")
         vf = folder / "VERIFICATION.md"
         assert vf.exists()
         content = vf.read_text(encoding="utf-8")
@@ -49,13 +49,13 @@ class TestSetupProject:
     def test_folder_name_contains_timestamp(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli = AgentCLI()
-        folder = cli.setup_project("T", "R", "C")
+        folder = cli.setup_project("T", "C")
         assert "agent_task_" in folder.name
 
     def test_sets_internal_state(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli = AgentCLI()
-        cli.setup_project("T", "R", "C")
+        cli.setup_project("T", "C")
         assert cli.project_folder is not None
         assert cli.task_file is not None
         assert cli.verification_file is not None
@@ -70,7 +70,7 @@ class TestWorkerLoop:
     def _make_cli(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli = AgentCLI()
-        cli.setup_project("Build hello world", "Never", "Script prints hello")
+        cli.setup_project("Build hello world", "Script prints hello")
         return cli
 
     @patch.object(AgentCLI, "call_claude")
@@ -129,7 +129,7 @@ class TestVerifyWork:
     def _make_cli(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli = AgentCLI()
-        cli.setup_project("T", "R", "C")
+        cli.setup_project("T", "C")
         return cli
 
     @patch.object(AgentCLI, "call_claude")
@@ -223,7 +223,7 @@ class TestCreateSummary:
     def _make_cli(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli = AgentCLI()
-        cli.setup_project("T", "R", "C")
+        cli.setup_project("T", "C")
         return cli
 
     @patch.object(AgentCLI, "call_claude")
@@ -257,7 +257,7 @@ class TestContactUser:
     def test_creates_response_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli = AgentCLI()
-        cli.setup_project("T", "R", "C")
+        cli.setup_project("T", "C")
 
         # Simulate user input
         monkeypatch.setattr("builtins.input", MagicMock(side_effect=["My answer", EOFError]))
@@ -279,7 +279,7 @@ class TestCallClaudeCmdConstruction:
     def _make_cli(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli = AgentCLI()
-        cli.setup_project("T", "R", "C")
+        cli.setup_project("T", "C")
         return cli
 
     @patch("autonomous_agent.subprocess.Popen")
@@ -561,7 +561,7 @@ class TestWorkerLoopPhaseStats:
     def _make_cli(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli = AgentCLI()
-        cli.setup_project("Build hello world", "Never", "Script prints hello")
+        cli.setup_project("Build hello world", "Script prints hello")
         return cli
 
     @patch.object(AgentCLI, "call_claude")
@@ -591,7 +591,7 @@ class TestVerifyWorkPhaseStats:
     def _make_cli(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli = AgentCLI()
-        cli.setup_project("T", "R", "C")
+        cli.setup_project("T", "C")
         return cli
 
     @patch.object(AgentCLI, "call_claude")

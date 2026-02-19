@@ -615,22 +615,20 @@ class IntegratedTaskWorker:
             raw_prompt: Raw unstructured text from Dataverse
 
         Returns:
-            dict with keys: task_description, contact_rules, success_criteria
+            dict with keys: task_description, success_criteria
         """
         print("[LLM PARSER] Parsing unstructured prompt...")
 
         parsing_prompt = f"""You are a prompt parser. Extract the following fields from the raw task prompt below:
 
 1. **task_description**: The main task to accomplish (what needs to be done)
-2. **contact_rules**: When/how to contact the user (default: "Only when blocked")
-3. **success_criteria**: How to know when the task is complete
+2. **success_criteria**: How to know when the task is complete
 
-Return ONLY a JSON object with these three fields. No markdown, no explanation, just the JSON.
+Return ONLY a JSON object with these two fields. No markdown, no explanation, just the JSON.
 
 Example output format:
 {{
   "task_description": "Create a REST API for user authentication",
-  "contact_rules": "Only when blocked",
   "success_criteria": "API endpoints work and tests pass"
 }}
 
@@ -684,14 +682,13 @@ JSON output:"""
             parsed = json.loads(json_str)
 
             # Validate required fields
-            required_fields = ['task_description', 'contact_rules', 'success_criteria']
+            required_fields = ['task_description', 'success_criteria']
             for field in required_fields:
                 if field not in parsed:
                     parsed[field] = ""  # Provide empty default
 
             print(f"[LLM PARSER] ✓ Successfully parsed prompt")
             print(f"  - Task: {parsed['task_description'][:60]}...")
-            print(f"  - Contact: {parsed['contact_rules'][:40]}")
             print(f"  - Criteria: {parsed['success_criteria'][:60]}...")
 
             return parsed
@@ -700,7 +697,6 @@ JSON output:"""
             print("[LLM PARSER] ✗ Timeout - falling back to default")
             return {
                 'task_description': raw_prompt,
-                'contact_rules': 'Only when blocked',
                 'success_criteria': 'Review and confirm task is complete'
             }
         except Exception as e:
@@ -708,7 +704,6 @@ JSON output:"""
             print(f"[LLM PARSER] Falling back to using raw prompt")
             return {
                 'task_description': raw_prompt,
-                'contact_rules': 'Only when blocked',
                 'success_criteria': 'Review and confirm task is complete'
             }
 
@@ -1073,7 +1068,6 @@ JSON output:"""
             parsed = self.parse_prompt_with_llm(task_prompt)
 
         task_description = parsed['task_description']
-        contact_rules = parsed['contact_rules'] or 'Only when blocked'
         success_criteria = parsed['success_criteria']
 
         # Create OneDrive session folder for this task
@@ -1086,7 +1080,6 @@ JSON output:"""
         # Setup project in the OneDrive session folder
         project_folder = agent.setup_project(
             task_description,
-            contact_rules,
             success_criteria,
             project_folder_path=session_folder
         )

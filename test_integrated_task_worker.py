@@ -361,7 +361,6 @@ class TestParsePromptWithLlm:
         mod, _ = _import_worker(monkeypatch, tmp_path)
         parsed_json = {
             "task_description": "Create API",
-            "contact_rules": "Only when blocked",
             "success_criteria": "Tests pass"
         }
         response_json = json.dumps({"result": json.dumps(parsed_json)})
@@ -387,7 +386,7 @@ class TestParsePromptWithLlm:
         worker = mod.IntegratedTaskWorker()
         result = worker.parse_prompt_with_llm("Raw prompt text")
         assert result["task_description"] == "Raw prompt text"
-        assert result["contact_rules"] == "Only when blocked"
+        assert result["success_criteria"] == "Review and confirm task is complete"
 
     @patch("integrated_task_worker.subprocess.Popen")
     def test_parse_error_returns_fallback(self, mock_popen, monkeypatch, tmp_path):

@@ -115,11 +115,10 @@ class AgentCLI:
     def __init__(self):
         self.project_folder = None
         self.task_file = None
-        self.communication_file = None
         self.verification_file = None
 
     def collect_inputs(self):
-        """Phase 1: Collect the 3 required inputs from user"""
+        """Phase 1: Collect the 2 required inputs from user"""
         print("\n" + "="*60)
         print("AUTONOMOUS AGENT CLI - Setup")
         print("="*60 + "\n")
@@ -156,9 +155,9 @@ class AgentCLI:
             pass
         success_criteria = "\n".join(success_lines)
 
-        return task_description, 'Only when blocked', success_criteria
+        return task_description, success_criteria
 
-    def setup_project(self, task_description, contact_rules, success_criteria, project_folder_path=None):
+    def setup_project(self, task_description, success_criteria, project_folder_path=None):
         """Phase 2: Create subfolder and project files"""
         if project_folder_path is not None:
             self.project_folder = Path(project_folder_path)
@@ -825,10 +824,10 @@ Write SUMMARY.md with your summary, then output a brief confirmation message.
         """Main execution loop"""
         try:
             # Phase 1: Collect inputs
-            task_desc, contact_rules, success_criteria = self.collect_inputs()
+            task_desc, success_criteria = self.collect_inputs()
 
             # Phase 2: Setup project
-            self.setup_project(task_desc, contact_rules, success_criteria)
+            self.setup_project(task_desc, success_criteria)
 
             # Phase 3-5: Worker/Verifier loop
             max_iterations = 10

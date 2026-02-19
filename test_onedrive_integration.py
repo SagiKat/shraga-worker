@@ -304,7 +304,6 @@ class TestSetupProjectWithCustomPath:
         cli = AgentCLI()
         folder = cli.setup_project(
             "Build something",
-            "Only when blocked",
             "Tests pass",
             project_folder_path=custom_path,
         )
@@ -323,7 +322,6 @@ class TestSetupProjectWithCustomPath:
         cli = AgentCLI()
         folder = cli.setup_project(
             "Deep task",
-            "Never",
             "Done when created",
             project_folder_path=deep_path,
         )
@@ -337,7 +335,7 @@ class TestSetupProjectWithCustomPath:
         monkeypatch.chdir(tmp_path)
 
         cli = AgentCLI()
-        folder = cli.setup_project("Default task", "Only when blocked", "Completed")
+        folder = cli.setup_project("Default task", "Completed")
 
         # Default folder name starts with "agent_task_" and contains a timestamp
         assert "agent_task_" in folder.name
@@ -421,7 +419,7 @@ class TestResultFormatting:
 
             parsed_prompt = {
                 "task_description": "Test task",
-                "contact_rules": "Only when blocked",
+
                 "success_criteria": "Tests pass",
             }
 
@@ -461,7 +459,7 @@ class TestResultFormatting:
 
             parsed_prompt = {
                 "task_description": "Fallback task",
-                "contact_rules": "Only when blocked",
+
                 "success_criteria": "Tests pass",
             }
 
@@ -539,7 +537,7 @@ class TestEarlyOneDriveUrlWrite:
 
             parsed_prompt = {
                 "task_description": "Early URL task",
-                "contact_rules": "Only when blocked",
+
                 "success_criteria": "Tests pass",
             }
 
@@ -613,7 +611,7 @@ class TestEarlyOneDriveUrlWrite:
 
             parsed_prompt = {
                 "task_description": "Failing task",
-                "contact_rules": "Only when blocked",
+
                 "success_criteria": "Tests pass",
             }
 
