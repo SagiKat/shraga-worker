@@ -941,6 +941,7 @@ class TaskManager:
 
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=90, env=env, cwd=cwd,
+            encoding="utf-8", errors="replace",
         )
 
         if result.returncode != 0:
