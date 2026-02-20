@@ -979,6 +979,9 @@ class TaskManager:
 
     def run(self):
         """Main polling loop."""
+        if sys.platform == "win32":
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
         print(f"[START] Personal Task Manager for {self.user_email} | instance={INSTANCE_ID} | pid={os.getpid()}")
         print(f"[CONFIG] Dataverse: {DATAVERSE_URL}")
         print(f"[CONFIG] Poll interval: {POLL_INTERVAL}s")
