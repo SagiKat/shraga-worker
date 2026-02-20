@@ -669,9 +669,10 @@ class TestSystemPrompt:
     def test_system_prompt_with_devbox_manager(self, manager):
         manager.devbox_manager = MagicMock()
         prompt = manager._build_system_prompt("user@example.com", has_devbox_manager=True)
-        assert "provision" in prompt.lower()
-        assert "NOT configured" not in prompt
+        assert "get_user_state" in prompt
+        assert "get_rdp_auth_message" in prompt
 
     def test_system_prompt_without_devbox_manager(self, manager):
         prompt = manager._build_system_prompt("user@example.com", has_devbox_manager=False)
-        assert "NOT configured" in prompt
+        assert "Global Manager" in prompt
+        assert "MUST" in prompt
