@@ -159,8 +159,8 @@ class DevBoxManager:
         if response.status_code == 200:
             data = response.json()
 
-            # Construct connection URL
-            connection_url = f"https://devbox.microsoft.com/connect?devbox={devbox_name}"
+            # Get direct web RDP URL from remoteConnection API
+            connection_url = self._get_remote_connection_url(user_azure_ad_id, devbox_name)
 
             return DevBoxInfo(
                 name=data.get("name"),
@@ -171,6 +171,37 @@ class DevBoxManager:
             )
         else:
             raise Exception(f"Failed to get Dev Box status: {response.status_code} {response.text}")
+
+    def _get_remote_connection_url(self, user_azure_ad_id: str, devbox_name: str) -> str:
+        """
+        Get the direct web RDP URL via the remoteConnection API.
+
+        Returns the webUrl from show-remote-connection which opens the RDP
+        session directly (not the portal page).
+        """
+        url = (
+            f"{self.devcenter_endpoint}/projects/{self.project_name}"
+            f"/users/{user_azure_ad_id}/devboxes/{devbox_name}"
+            f"/remoteConnection"
+        )
+
+        try:
+            response = requests.get(
+                url,
+                headers=self._get_headers(),
+                params={"api-version": self.api_version},
+                timeout=30
+            )
+            if response.status_code == 200:
+                data = response.json()
+                web_url = data.get("webUrl", "")
+                if web_url:
+                    return web_url
+        except Exception:
+            pass
+
+        # Fallback: construct portal URL if API fails
+        return f"https://devbox.microsoft.com/connect?devbox={devbox_name}"
 
     def get_connection_url(self, user_azure_ad_id: str, devbox_name: str) -> str:
         """
@@ -334,6 +365,85 @@ class DevBoxManager:
         else:
             raise Exception(
                 f"Failed to get customization status: {response.status_code} {response.text}"
+            )
+
+    def apply_deploy_customizations(
+        self,
+        user_azure_ad_id: str,
+        devbox_name: str,
+    ) -> Dict[str, Any]:
+        """
+        Apply deployment customizations (Group 2) to a Dev Box.
+
+        This must run AFTER apply_customizations() (Group 1) succeeds,
+        because it depends on Git and Python being installed.
+
+        Installs: repo clone, pip packages, ShragaWorker scheduled task,
+        and the Shraga-Authenticate desktop shortcut.
+        """
+        url = (
+            f"{self.devcenter_endpoint}/projects/{self.project_name}"
+            f"/users/{user_azure_ad_id}/devboxes/{devbox_name}"
+            f"/customizationGroups/shraga-deploy"
+        )
+
+        # Single powershell task matching setup.ps1 Step 5
+        deploy_command = (
+            "powercfg /change monitor-timeout-ac 0; "
+            "powercfg /change standby-timeout-ac 0; "
+            "powercfg /change hibernate-timeout-ac 0; "
+            "powercfg /change disk-timeout-ac 0; "
+            "powercfg /hibernate off; "
+            "reg add 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services' "
+            "/v fResetBroken /t REG_DWORD /d 0 /f; "
+            "& 'C:\\Program Files\\Git\\cmd\\git.exe' clone --single-branch --depth 1 "
+            "https://github.com/SagiKat/shraga-worker.git 'C:\\Dev\\shraga-worker'; "
+            "& 'C:\\Python312\\python.exe' -m pip install requests azure-identity azure-core watchdog; "
+            "$action = New-ScheduledTaskAction -Execute 'C:\\Python312\\python.exe' "
+            "-Argument 'C:\\Dev\\shraga-worker\\integrated_task_worker.py' "
+            "-WorkingDirectory 'C:\\Dev\\shraga-worker'; "
+            "$trigger = New-ScheduledTaskTrigger -AtStartup; "
+            "Register-ScheduledTask -TaskName 'ShragaWorker' -Action $action "
+            "-Trigger $trigger -User 'SYSTEM' -RunLevel Highest -Force; "
+            "Invoke-WebRequest -Uri "
+            "'https://raw.githubusercontent.com/SagiKat/shraga-worker/main/authenticate.ps1' "
+            "-OutFile 'C:\\Users\\Public\\Desktop\\Shraga-Authenticate.ps1'; "
+            "$ws = New-Object -ComObject WScript.Shell; "
+            "$sc = $ws.CreateShortcut('C:\\Users\\Public\\Desktop\\Shraga-Authenticate.lnk'); "
+            "$sc.TargetPath = 'powershell.exe'; "
+            "$sc.Arguments = '-ExecutionPolicy Bypass -File "
+            "C:\\Users\\Public\\Desktop\\Shraga-Authenticate.ps1'; "
+            "$sc.Save()"
+        )
+
+        body = {
+            "tasks": [
+                {
+                    "name": "DevBox.Catalog/powershell",
+                    "parameters": {"command": deploy_command},
+                }
+            ]
+        }
+
+        response = requests.put(
+            url,
+            json=body,
+            headers=self._get_headers(),
+            params={"api-version": "2025-04-01-preview"},
+            timeout=30,
+        )
+
+        if response.status_code in [200, 201, 202]:
+            result = response.json()
+            print(f"Deploy customization applied to {devbox_name}")
+            return result
+        elif response.status_code == 409:
+            print(f"Deploy customization already exists on {devbox_name}, skipping")
+            return {"status": "AlreadyExists", "name": "shraga-deploy"}
+        else:
+            raise Exception(
+                f"Failed to apply deploy customizations: "
+                f"{response.status_code} {response.text}"
             )
 
     def run_command_on_devbox(

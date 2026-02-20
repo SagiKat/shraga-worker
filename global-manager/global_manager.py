@@ -130,44 +130,11 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "provision_devbox",
-        "description": (
-            "Provision a new dev box for the user. Resolves their Azure AD ID "
-            "via Microsoft Graph and kicks off provisioning. Returns the devbox "
-            "name on success."
-        ),
-        "parameters": {
-            "user_email": "string -- the user's email address",
-        },
-    },
-    {
         "name": "check_devbox_status",
         "description": (
-            "Check the current provisioning state of a dev box. Returns "
+            "Check the current provisioning state of a user's dev box. Returns "
             "provisioning_state (e.g. Succeeded, Failed, Creating), status, "
-            "and connection_url."
-        ),
-        "parameters": {
-            "devbox_name": "string -- name of the dev box",
-            "azure_ad_id": "string -- user's Azure AD object ID",
-        },
-    },
-    {
-        "name": "apply_customizations",
-        "description": (
-            "Apply software customizations (Git, Claude Code, Python) to a "
-            "provisioned dev box."
-        ),
-        "parameters": {
-            "devbox_name": "string -- name of the dev box",
-            "azure_ad_id": "string -- user's Azure AD object ID",
-        },
-    },
-    {
-        "name": "check_customization_status",
-        "description": (
-            "Check the status of customization tasks on a dev box. Returns "
-            "status (Running, Succeeded, Failed, etc.)."
+            "and the direct web RDP connection URL."
         ),
         "parameters": {
             "devbox_name": "string -- name of the dev box",
@@ -664,22 +631,8 @@ class GlobalManager:
                 tool_args.get("user_email", user_email),
                 tool_args.get("fields", {}),
             )
-        elif tool_name == "provision_devbox":
-            return self._tool_provision_devbox(
-                tool_args.get("user_email", user_email),
-            )
         elif tool_name == "check_devbox_status":
             return self._tool_check_devbox_status(
-                tool_args.get("devbox_name", ""),
-                tool_args.get("azure_ad_id", ""),
-            )
-        elif tool_name == "apply_customizations":
-            return self._tool_apply_customizations(
-                tool_args.get("devbox_name", ""),
-                tool_args.get("azure_ad_id", ""),
-            )
-        elif tool_name == "check_customization_status":
-            return self._tool_check_customization_status(
                 tool_args.get("devbox_name", ""),
                 tool_args.get("azure_ad_id", ""),
             )
@@ -857,10 +810,9 @@ class GlobalManager:
     def _build_system_prompt(self, user_email: str, has_devbox_manager: bool) -> str:
         """Build the system prompt for Claude based on current context."""
         devbox_note = (
-            "You have tools to provision dev boxes, check status, apply "
-            "customizations, and guide users through authentication."
+            "You can check dev box status and guide users through authentication."
             if has_devbox_manager else
-            "Dev box provisioning is NOT configured on this instance."
+            "Dev box management is NOT configured on this instance."
         )
 
         return (
@@ -869,15 +821,22 @@ class GlobalManager:
             "a user's personal task manager is offline.\n\n"
             f"{devbox_note}\n\n"
             "GUIDELINES:\n"
-            "- For new users: check their state, provision a dev box if needed, "
-            "monitor provisioning, apply customizations, then guide them through "
-            "authentication via the RDP link.\n"
+            "- Be conversational and helpful, like a friendly colleague.\n"
+            "- You can answer questions, have a conversation, and explain how "
+            "the system works.\n"
+            "- For new users: check their state, guide them to run setup.ps1 "
+            "themselves (you CANNOT provision dev boxes -- the user must sign "
+            "into Azure themselves and run: "
+            "irm https://raw.githubusercontent.com/SagiKat/shraga-worker/main/setup.ps1 | iex). "
+            "Monitor their provisioning progress with check_devbox_status, and "
+            "when the dev box is ready, use get_rdp_auth_message to send them "
+            "the RDP link with auth instructions.\n"
             "- For users whose personal manager is offline: acknowledge the issue "
             "and let them know you are handling it.\n"
-            "- Be friendly, concise, and informative.\n"
             "- Do NOT use markdown formatting -- respond in plain text only.\n"
             "- When authentication is needed, use get_rdp_auth_message to get "
-            "the full instructions, then include that in your response.\n"
+            "the full instructions (it includes the direct RDP link and tells "
+            "the user to double-click the Shraga-Authenticate shortcut).\n"
             "- When a user confirms they completed setup (e.g., 'done', 'yes', "
             "'finished', etc.), use mark_user_onboarded to complete onboarding.\n\n"
             "IMPORTANT: Respond ONLY with JSON as instructed. Do NOT include "

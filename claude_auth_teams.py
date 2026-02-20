@@ -235,21 +235,14 @@ class RemoteDevBoxAuth:
     def build_auth_message(self, connection_url: str) -> str:
         """Build the Teams message that guides the user through dev box auth."""
         return (
-            "**Your dev box is ready! Please complete setup:**\n\n"
-            "**Step 1 -- Connect to your dev box:**\n"
+            "Your dev box is ready! Please complete setup:\n\n"
+            "Step 1 -- Connect to your dev box:\n"
             f"Open this link in your browser: {connection_url}\n\n"
-            "**Step 2 -- Authenticate Claude Code:**\n"
-            "In the browser session, open **PowerShell** and run:\n"
-            "```\nclaude /login\n```\n"
-            "Follow the prompts to sign in with your Anthropic account.\n\n"
-            "**Step 3 -- Run the setup script:**\n"
-            "Still in PowerShell on the dev box, run:\n"
-            "```\n"
-            "irm https://raw.githubusercontent.com/SagiKat/shraga-worker/main/authenticate.ps1 | iex\n"
-            "```\n"
-            "Or paste the following script directly:\n"
-            f"```powershell\n{DEVBOX_SETUP_SCRIPT}\n```\n\n"
-            "Once you have completed these steps, reply here with **done** "
+            "Step 2 -- Authenticate:\n"
+            "Double-click the Shraga-Authenticate shortcut on the desktop. "
+            "It will run az login (browser sign-in) and claude /login "
+            "(device code auth). Follow the prompts for both.\n\n"
+            "Once you have completed these steps, reply here with done "
             "and I will verify everything is set up."
         )
 

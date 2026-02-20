@@ -164,7 +164,7 @@ class TestRemoteDevBoxAuth:
         """The auth message includes setup instructions."""
         auth = RemoteDevBoxAuth()
         msg = auth.build_auth_message("https://example.com")
-        assert "PowerShell" in msg
+        assert "Shraga-Authenticate" in msg
         assert "done" in msg.lower()
 
     def test_build_setup_script_message(self):

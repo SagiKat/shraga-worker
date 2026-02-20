@@ -333,9 +333,8 @@ class TestTools:
         )
         msg = result["message"]
         assert "devbox.microsoft.com" in msg
-        assert "claude /login" in msg
-        assert "pip install" in msg
-        assert "shraga-worker" in msg
+        assert "Shraga-Authenticate" in msg
+        assert "done" in msg.lower()
 
     @patch("global_manager.requests.patch")
     @patch("global_manager.requests.get")
@@ -360,12 +359,15 @@ class TestAgenticOnboarding:
     @patch("global_manager.requests.get")
     @patch("global_manager.requests.post")
     @patch("global_manager.requests.patch")
-    def test_claude_can_provision_via_tools(self, mock_patch, mock_post, mock_get, manager):
-        """Simulate Claude calling the provision_devbox tool."""
+    def test_claude_can_check_status_via_tools(self, mock_patch, mock_post, mock_get, manager):
+        """Simulate Claude calling the check_devbox_status tool."""
         mock_devbox = self._make_manager_with_devbox(manager)
-        mock_devbox.provision_devbox.return_value = {"name": "shraga-newuser"}
+        mock_devbox.get_devbox_status.return_value = MagicMock(
+            provisioning_state="Succeeded", status="Running",
+            connection_url="https://rdp.example.com"
+        )
 
-        mock_get.return_value = FakeResponse(json_data={"id": "real-aad-guid"})
+        mock_get.return_value = FakeResponse(json_data={"value": []})
         mock_post.return_value = FakeResponse(json_data={})
         mock_patch.return_value = FakeResponse(status_code=204)
 
@@ -374,25 +376,23 @@ class TestAgenticOnboarding:
         def mock_claude(text, system_prompt):
             call_count[0] += 1
             if call_count[0] == 1:
-                # Claude decides to provision
                 return json.dumps({
-                    "tool_calls": [{"name": "provision_devbox", "arguments": {"user_email": "newuser@example.com"}}]
+                    "tool_calls": [{"name": "check_devbox_status", "arguments": {"devbox_name": "shraga-newuser", "azure_ad_id": "aad-guid"}}]
                 })
             else:
-                # Claude composes a response after seeing tool result
                 return json.dumps({
-                    "response": "I have started provisioning your dev box (shraga-newuser). This may take a few minutes."
+                    "response": "Your dev box shraga-newuser is ready and running."
                 })
 
         with patch.object(manager, "_call_claude", side_effect=mock_claude):
             result = manager._call_claude_with_tools(
-                "User email: newuser@example.com\nUser message: \"hello\"",
+                "User email: newuser@example.com\nUser message: \"status?\"",
                 "system prompt",
                 {"user_email": "newuser@example.com", "row_id": "r1", "mcs_conv_id": "c1"},
             )
 
         assert "shraga-newuser" in result
-        mock_devbox.provision_devbox.assert_called_once()
+        mock_devbox.get_devbox_status.assert_called_once()
 
     @patch("global_manager.requests.get")
     @patch("global_manager.requests.post")
@@ -501,8 +501,8 @@ class TestRdpAuthMessage:
     def test_rdp_message_contains_setup_instructions(self, manager):
         result = manager._tool_get_rdp_auth_message("https://example.com")
         msg = result["message"]
-        assert "pip install" in msg
-        assert "shraga-worker" in msg
+        assert "Shraga-Authenticate" in msg
+        assert "done" in msg.lower()
 
     def test_rdp_message_fallback_url(self, manager):
         """When no connection_url is in state, a default can be constructed."""

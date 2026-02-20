@@ -231,14 +231,16 @@ class TestWaitForProvisioning:
         mock_cred_inst.get_token.return_value = MagicMock(token="fake-token")
         mock_cred.return_value = mock_cred_inst
 
-        # First call: Provisioning, second call: Succeeded
+        # Each get_devbox_status call makes 2 requests: status + remoteConnection
         mock_get.side_effect = [
             MagicMock(status_code=200, json=lambda: {
                 "name": "box", "user": "u", "powerState": "Off", "provisioningState": "Provisioning"
             }),
+            MagicMock(status_code=200, json=lambda: {"webUrl": "https://rdp.example.com"}),
             MagicMock(status_code=200, json=lambda: {
                 "name": "box", "user": "u", "powerState": "Running", "provisioningState": "Succeeded"
-            })
+            }),
+            MagicMock(status_code=200, json=lambda: {"webUrl": "https://rdp.example.com"}),
         ]
         mock_time.side_effect = [0, 10, 20, 40]
 
