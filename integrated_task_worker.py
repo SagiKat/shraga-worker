@@ -1490,7 +1490,20 @@ Full transcript saved in Dataverse (Task ID: {task_id})"""
                     print(f"[FOUND] {len(tasks)} pending task(s)")
 
                     for task in tasks:
-                        self.process_task(task)
+                        try:
+                            self.process_task(task)
+                        except Exception as e:
+                            print(f"[ERROR] Unhandled exception processing task: {e}")
+                            self._cleanup_in_progress_task(f"Unhandled error: {e}")
+                            try:
+                                self.send_to_webhook(f"Task failed with unhandled error: {e}")
+                            except Exception:
+                                pass
+                            # Promote any queued tasks even after failure
+                            try:
+                                self.promote_queued_tasks()
+                            except Exception:
+                                pass
                 else:
                     # IDLE - Check for updates (every 10 minutes)
                     now = datetime.now(tz=timezone.utc)
