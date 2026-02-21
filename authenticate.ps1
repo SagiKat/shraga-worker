@@ -64,10 +64,23 @@ Write-Host ""
 # Step 1: Azure Login with retry logic
 # =========================================================================
 Write-Step "1/5" "Azure Login" "Yellow"
-Write-Info "A browser window will open. Sign in with your Microsoft account."
 
+# Check if already authenticated
 $azLoginSuccess = $false
-for ($attempt = 1; $attempt -le $MAX_AZ_LOGIN_RETRIES; $attempt++) {
+try {
+    $existingAccount = az account show --output json 2>$null | ConvertFrom-Json
+    if ($existingAccount -and $existingAccount.user.name) {
+        Write-Success "Already signed in as: $($existingAccount.user.name)"
+        Write-Info "Skipping Azure login (use 'az logout' first to force re-auth)."
+        $azLoginSuccess = $true
+    }
+} catch { }
+
+if (-not $azLoginSuccess) {
+    Write-Info "A browser window will open. Sign in with your Microsoft account."
+}
+
+for ($attempt = 1; $attempt -le $MAX_AZ_LOGIN_RETRIES -and -not $azLoginSuccess; $attempt++) {
     Write-Info "Attempt $attempt of $MAX_AZ_LOGIN_RETRIES..."
 
     try {
