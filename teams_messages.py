@@ -301,8 +301,8 @@ def send_teams_message(webhook_url: str, card: Dict[str, Any]):
 if __name__ == "__main__":
     # Example: Send auth required message
     card = get_auth_required_card(
-        connection_url="https://devbox.microsoft.com/connect?devbox=shraga-user1",
-        devbox_name="shraga-user1"
+        connection_url="https://devbox.microsoft.com/connect?devbox=shraga-box-01",
+        devbox_name="shraga-box-01"
     )
 
     # Pretty print the card JSON

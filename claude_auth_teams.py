@@ -534,9 +534,9 @@ def example_orchestrator_flow():
     teams_auth = TeamsClaudeAuth(
         send_message_func=send_teams_message,
         user_id=user_id,
-        devbox_name="shraga-user",
+        devbox_name="shraga-box-01",
         user_azure_ad_id="b08e39b4-2ac6-4465-a35e-48322efb0f98",
-        connection_url="https://devbox.microsoft.com/connect?devbox=shraga-user",
+        connection_url="https://devbox.microsoft.com/connect?devbox=shraga-box-01",
     )
 
     # Request authentication (sends RDP link targeting the dev box)
