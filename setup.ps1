@@ -15,6 +15,8 @@ $Project = "PVA"
 $Pool = "botdesigner-pool-italynorth"
 $ApiVersion = "2024-05-01-preview"
 $CustomApiVersion = "2025-04-01-preview"
+$TenantId = "72f988bf-86f1-41af-91ab-2d7cd011db47"
+$SubscriptionId = "b1749b92-7ad4-4211-bcd8-ceb41c5d17f1"  # PJ-PVA
 
 # Pre-check: az CLI must be installed
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
@@ -32,11 +34,13 @@ function Get-DevCenterToken {
 # Step 1: Authenticate
 Write-Host "[1/6] Authenticating..." -ForegroundColor Yellow
 Write-Host "  A browser window will open. Sign in with your Microsoft account." -ForegroundColor Gray
-az login --output none 2>$null
+az login --tenant $TenantId --output none 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  Authentication failed. Please try again." -ForegroundColor Red
     exit 1
 }
+az account set --subscription $SubscriptionId
+Write-Host "  Subscription set to: PJ-PVA ($SubscriptionId)" -ForegroundColor Gray
 $userEmail = az account show --query "user.name" -o tsv
 Write-Host "  Signed in as: $userEmail" -ForegroundColor Green
 
