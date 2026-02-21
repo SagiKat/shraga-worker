@@ -268,9 +268,15 @@ if (Test-Path $WORKER_SCRIPT) {
         } else {
             # Fall back to starting directly
             Write-Info "No scheduled task found. Starting worker directly..."
+            $pyCandidates = @(
+                "C:\Python312\python.exe",
+                "C:\ProgramData\chocolatey\lib\python312\tools\python.exe",
+                "C:\ProgramData\chocolatey\bin\python3.exe",
+                "C:\ProgramData\chocolatey\bin\python.exe"
+            )
             $pythonExe = "python"
-            if (Test-Path "C:\Python312\python.exe") {
-                $pythonExe = "C:\Python312\python.exe"
+            foreach ($c in $pyCandidates) {
+                if (Test-Path $c) { $pythonExe = $c; break }
             }
             Start-Process -FilePath $pythonExe `
                 -ArgumentList $WORKER_SCRIPT `
