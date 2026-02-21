@@ -68,11 +68,12 @@ The PM maintains conversation continuity across messages using the `--resume` pa
 
 ```
 claude --print --output-format json --dangerously-skip-permissions \
-  --append-system-prompt "<system_prompt>" \
   [--model <CHAT_MODEL>] \
   [--resume <session_id>] \
-  "<user_message>"
+  -p "<user_message>"
 ```
+
+Claude reads this CLAUDE.md file from the working directory automatically. No system prompt injection is needed.
 
 The `CLAUDECODE` environment variable is stripped from the child process to avoid recursion.
 

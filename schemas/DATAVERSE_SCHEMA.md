@@ -258,7 +258,7 @@ None (no formal Dataverse lookup relationships). The `crb3b_taskid` column store
 | 5 | `crb3b_devboxstatus` | `crb3b_devboxstatus` | DevBox Status | Single Line of Text (String) | 50 | Optional | Provisioning state. Values: `Provisioning`, `Succeeded`, `Failed` |
 | 6 | `crb3b_claudeauthstatus` | `crb3b_claudeauthstatus` | Claude Auth Status | Single Line of Text (String) | 50 | Optional | Authentication state. Values: `Pending`, `Authenticated`, `Failed` |
 | 7 | `crb3b_managerstatus` | `crb3b_managerstatus` | Manager Status | Single Line of Text (String) | 50 | Optional | Personal manager state. Values: `Starting`, `Running`, `Offline` |
-| 8 | `crb3b_onboardingstep` | `crb3b_onboardingstep` | Onboarding Step | Single Line of Text (String) | 100 | Optional | Current onboarding stage. Values: `provisioning`, `waiting_provisioning`, `provisioning_failed`, `auth_pending`, `auth_code_sent`, `completed` |
+| 8 | `crb3b_onboardingstep` | `crb3b_onboardingstep` | Onboarding Step | Single Line of Text (String) | 100 | Optional | Current onboarding stage. Values: `awaiting_setup`, `provisioning`, `waiting_provisioning`, `provisioning_failed`, `auth_pending`, `auth_code_sent`, `completed` |
 | 9 | `crb3b_lastseen` | `crb3b_lastseen` | Last Seen | DateTime | -- | Optional | Updated on every user interaction. ISO 8601 format |
 | 10 | `crb3b_connectionurl` | `crb3b_connectionurl` | Connection URL | Single Line of Text (String) | 1000 | Optional | Dev box RDP/browser connection URL (e.g., `https://devbox.microsoft.com/connect?devbox={name}`) |
 | 11 | `crb3b_authurl` | `crb3b_authurl` | Auth URL | Single Line of Text (String) | 1000 | Optional | Claude Code device authentication URL (sent to user for sign-in) |
@@ -279,6 +279,7 @@ None (no formal Dataverse lookup relationships). The `crb3b_taskid` column store
 
 | Value | Meaning |
 |---|---|
+| `awaiting_setup` | User record created, waiting for user to run setup.ps1 |
 | `provisioning` | Dev box provisioning just started |
 | `waiting_provisioning` | Waiting for dev box provisioning to complete |
 | `provisioning_failed` | Dev box provisioning failed |
