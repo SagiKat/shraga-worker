@@ -753,7 +753,7 @@ class TestSweepStaleTasks:
         )
         for c in mock_patch.call_args_list:
             body = c[1]["json"]
-            assert body["cr_status"] == "Failed"
+            assert body["cr_status"] == 8
             assert body["cr_result"] == expected_message
 
         patched_urls = [c[0][0] for c in mock_patch.call_args_list]
@@ -1309,7 +1309,7 @@ class TestMonitorTaskPostRefactor:
         # 2. Verify the stale task was PATCHed to Failed
         patch_calls_with_json = [
             c for c in mock_patch.call_args_list
-            if c[1].get("json", {}).get("cr_status") == "Failed"
+            if c[1].get("json", {}).get("cr_status") == 8
         ]
         assert len(patch_calls_with_json) >= 1, (
             "Stale running task should be PATCHed to Failed"
@@ -1318,7 +1318,7 @@ class TestMonitorTaskPostRefactor:
         # 3. Verify the failure message on the patched task
         failed_patch = patch_calls_with_json[0]
         patch_body = failed_patch[1]["json"]
-        assert patch_body["cr_status"] == "Failed"
+        assert patch_body["cr_status"] == 8
         assert "no progress detected" in patch_body["cr_result"]
         assert "30+ minutes" in patch_body["cr_result"]
 
