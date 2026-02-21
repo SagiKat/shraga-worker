@@ -451,7 +451,7 @@ class IntegratedTaskWorker:
         try:
             url = f"{DATAVERSE_URL}/api/data/v9.2/{TABLE}({task_id})"
             body = {
-                "cr_status": STATUS_RUNNING,
+                "cr_status": _STATUS_INT[STATUS_RUNNING],
                 "cr_statusmessage": f"Claimed by {MACHINE_NAME}",
             }
             response = requests.patch(url, headers=headers, json=body, timeout=REQUEST_TIMEOUT)
@@ -510,7 +510,7 @@ class IntegratedTaskWorker:
         try:
             url = f"{DATAVERSE_URL}/api/data/v9.2/{TABLE}({task_id})"
             body = {
-                "cr_status": STATUS_QUEUED,
+                "cr_status": _STATUS_INT[STATUS_QUEUED],
                 "cr_statusmessage": f"Queued on {MACHINE_NAME} -- waiting for current task to finish",
             }
             response = requests.patch(url, headers=headers, json=body, timeout=REQUEST_TIMEOUT)
@@ -575,7 +575,7 @@ class IntegratedTaskWorker:
 
         data = {}
         if status is not None:
-            data["cr_status"] = status
+            data["cr_status"] = _STATUS_INT.get(status, status) if isinstance(status, str) else status
         if status_message is not None:
             data["cr_statusmessage"] = status_message
         if result is not None:

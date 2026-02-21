@@ -164,7 +164,7 @@ class TestE2EWorkerLifecycle:
         assert result is True
 
         sent_data = mock_patch.call_args[1]["json"]
-        assert sent_data["cr_status"] == "Running"
+        assert sent_data["cr_status"] == 5
 
     @patch("integrated_task_worker.requests.post")
     def test_worker_sends_webhook_message(self, mock_post, monkeypatch, tmp_path):
@@ -744,7 +744,7 @@ class TestE2ECancelRunningTask:
                     ]
                     failed_updates = [
                         body for body in patch_bodies
-                        if body.get("cr_status") == "Failed"
+                        if body.get("cr_status") == 8
                     ]
                     assert len(failed_updates) >= 1, (
                         f"Expected at least one PATCH setting status to 'Failed', "
@@ -962,7 +962,7 @@ class TestE2ECancelRunningTask:
                     ]
                     completed_updates = [
                         body for body in patch_bodies
-                        if body.get("cr_status") == "Completed"
+                        if body.get("cr_status") == 7
                     ]
                     assert len(completed_updates) >= 1, (
                         f"Expected STATUS_COMPLETED ('Completed') update, got: {patch_bodies}"

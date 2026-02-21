@@ -237,7 +237,7 @@ class TestUpdateTask:
         # Verify PATCH was called with correct data
         call_kwargs = mock_patch.call_args
         sent_data = call_kwargs[1]["json"]
-        assert sent_data["cr_status"] == "Running"
+        assert sent_data["cr_status"] == 5
         assert sent_data["cr_statusmessage"] == "Running"
 
     @patch("integrated_task_worker.requests.patch")
@@ -570,7 +570,7 @@ class TestCleanupInProgressTask:
         # Should have called update_task with FAILED status
         call_kwargs = mock_patch.call_args
         sent_data = call_kwargs[1]["json"]
-        assert sent_data["cr_status"] == mod.STATUS_FAILED
+        assert sent_data["cr_status"] == 8  # Failed (integer picklist)
         assert "Worker interrupted" in sent_data["cr_statusmessage"]
         # Should clear task ID after cleanup
         assert worker.current_task_id is None
@@ -678,7 +678,7 @@ class TestUpdateTaskSessionSummary:
         assert result is True
         sent_data = mock_patch.call_args[1]["json"]
         assert sent_data["crb3b_sessionsummary"] == '{"test": true}'
-        assert sent_data["cr_status"] == "Completed"
+        assert sent_data["cr_status"] == 7
 
     @patch("integrated_task_worker.requests.patch")
     def test_update_task_omits_session_summary_when_none(self, mock_patch, monkeypatch, tmp_path):
@@ -707,7 +707,7 @@ class TestUpdateTaskSessionSummary:
         # Second call should not have crb3b_sessionsummary
         retry_data = mock_patch.call_args_list[1][1]["json"]
         assert "crb3b_sessionsummary" not in retry_data
-        assert retry_data["cr_status"] == "Completed"
+        assert retry_data["cr_status"] == 7
 
 
 # ===========================================================================
@@ -1438,7 +1438,7 @@ class TestClaimTask:
         assert call_headers["If-Match"] == 'W/"67890"'
         # Verify body sets status to Running
         call_body = mock_patch.call_args[1]["json"]
-        assert call_body["cr_status"] == mod.STATUS_RUNNING
+        assert call_body["cr_status"] == mod._STATUS_INT[mod.STATUS_RUNNING]
 
     @patch("integrated_task_worker.requests.patch")
     def test_claim_task_conflict_412(self, mock_patch, monkeypatch, tmp_path):
@@ -1566,7 +1566,7 @@ class TestQueueTask:
         result = worker.queue_task(task)
         assert result is True
         call_body = mock_patch.call_args[1]["json"]
-        assert call_body["cr_status"] == mod.STATUS_QUEUED
+        assert call_body["cr_status"] == mod._STATUS_INT[mod.STATUS_QUEUED]
 
     @patch("integrated_task_worker.requests.patch")
     def test_queue_task_failure(self, mock_patch, monkeypatch, tmp_path):
@@ -1613,7 +1613,7 @@ class TestPromoteQueuedTasks:
         worker.promote_queued_tasks()
         # Verify update_task was called to set status to Pending
         call_body = mock_patch.call_args[1]["json"]
-        assert call_body["cr_status"] == mod.STATUS_PENDING
+        assert call_body["cr_status"] == mod._STATUS_INT[mod.STATUS_PENDING]
 
     @patch("integrated_task_worker.requests.get")
     def test_promote_no_queued_tasks(self, mock_get, monkeypatch, tmp_path):
@@ -1893,7 +1893,7 @@ class TestProcessTask:
         completed_update_found = False
         for patch_call in mock_patch.call_args_list:
             call_data = patch_call[1].get("json", {})
-            if call_data.get("cr_status") == mod.STATUS_COMPLETED:
+            if call_data.get("cr_status") == mod._STATUS_INT[mod.STATUS_COMPLETED]:
                 completed_update_found = True
                 assert "Task completed and verified" in call_data.get("cr_statusmessage", "")
                 assert success_result in call_data.get("cr_result", "") or "aabbccdd" in call_data.get("cr_result", "")
@@ -1971,7 +1971,7 @@ class TestProcessTask:
         failed_update_found = False
         for patch_call in mock_patch.call_args_list:
             call_data = patch_call[1].get("json", {})
-            if call_data.get("cr_status") == mod.STATUS_FAILED:
+            if call_data.get("cr_status") == mod._STATUS_INT[mod.STATUS_FAILED]:
                 failed_update_found = True
                 assert "Task failed" in call_data.get("cr_statusmessage", "")
                 # Result should contain the error message prefixed with "Error: "
@@ -2025,7 +2025,7 @@ class TestProcessTask:
         queued_found = False
         for patch_call in mock_patch.call_args_list:
             call_data = patch_call[1].get("json", {})
-            if call_data.get("cr_status") == mod.STATUS_QUEUED:
+            if call_data.get("cr_status") == mod._STATUS_INT[mod.STATUS_QUEUED]:
                 queued_found = True
                 break
         assert queued_found, "Task should be queued when devbox is busy"
@@ -2083,7 +2083,7 @@ class TestProcessTask:
         failed_found = False
         for patch_call in mock_patch.call_args_list:
             call_data = patch_call[1].get("json", {})
-            if call_data.get("cr_status") == mod.STATUS_FAILED:
+            if call_data.get("cr_status") == mod._STATUS_INT[mod.STATUS_FAILED]:
                 failed_found = True
                 # Result should contain the cancel message
                 assert cancel_msg in call_data.get("cr_result", "")
