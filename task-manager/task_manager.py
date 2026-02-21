@@ -35,9 +35,9 @@ class TaskManager:
         self._token_cache = self._token_expires = None
         self._sessions_path = self._resolve_sessions_path()
         self._sessions: dict[str, str] = self._load_sessions()
-        # Load system prompt from CLAUDE.md
-        claude_md = Path(__file__).parent / "PM_SYSTEM_PROMPT.md"
-        self._system_prompt = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
+        # System prompt file path (passed via --system-prompt-file)
+        prompt_file = Path(__file__).parent / "PM_SYSTEM_PROMPT.md"
+        self._system_prompt_file = str(prompt_file) if prompt_file.exists() else ""
 
     def _resolve_sessions_path(self) -> Path:
         if SESSIONS_FILE: return Path(SESSIONS_FILE)
@@ -177,7 +177,7 @@ class TaskManager:
 
     def _call_claude(self, user_text: str, session_id: str | None = None) -> tuple[str | None, str]:
         cmd = ["claude", "--print", "--output-format", "json", "--dangerously-skip-permissions"]
-        if self._system_prompt: cmd.extend(["--system-prompt", self._system_prompt])
+        if self._system_prompt_file: cmd.extend(["--system-prompt-file", self._system_prompt_file])
         if CHAT_MODEL: cmd.extend(["--model", CHAT_MODEL])
         if session_id: cmd.extend(["--resume", session_id])
         cmd.extend(["-p", user_text])
