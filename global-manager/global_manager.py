@@ -75,7 +75,7 @@ def get_credential():
     environment variables.  Returns a ``DefaultAzureCredential`` instance.
     """
     cred = DefaultAzureCredential()
-    cred.get_token("https://management.azure.com/.default")
+    cred.get_token(f"{DATAVERSE_URL}/.default")
     print("[AUTH] Using existing Azure credentials")
     return cred
 

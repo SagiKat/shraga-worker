@@ -703,6 +703,8 @@ JSON output:"""
             return parsed
 
         except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
             print("[LLM PARSER] ✗ Timeout - falling back to default")
             return {
                 'task_description': raw_prompt,
@@ -783,6 +785,8 @@ JSON output:"""
             return result_text
 
         except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
             print("[SHORT DESC] Timeout - falling back to truncated prompt")
             fallback = raw_prompt.replace('\n', ' ').strip()[:120]
             if len(raw_prompt) > 120:
@@ -1769,7 +1773,8 @@ Full transcript saved in Dataverse (Task ID: {task_id})"""
             self.update_task(
                 self.current_task_id,
                 status=STATUS_FAILED,
-                status_message=f"Worker shutdown: {reason}"
+                status_message=f"Worker shutdown: {reason}",
+                result=f"Error: {reason}"
             )
             self.current_task_id = None
 

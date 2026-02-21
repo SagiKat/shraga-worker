@@ -228,6 +228,7 @@ class TaskManager:
         print(f"[CONFIG] DV: {DV_URL} | Poll: {POLL_SEC}s")
         self.cleanup_stale_outbound()
         last_cleanup = time.time()
+        last_sweep = 0  # Sweep on first iteration, then every 5 minutes
         while True:
             try:
                 for m in self.poll_unclaimed():
@@ -238,7 +239,7 @@ class TaskManager:
                             print(f"[ERROR] Processing {rid}: {e}")
                             try: self.send_response(rid, m.get("cr_mcs_conversation_id",""), FALLBACK_MESSAGE); self.mark_processed(rid)
                             except Exception: pass
-                self.sweep_stale_tasks()
+                if time.time() - last_sweep > 300: self.sweep_stale_tasks(); last_sweep = time.time()
                 if time.time() - last_cleanup > 1800: self.cleanup_stale_outbound(); last_cleanup = time.time()
                 time.sleep(POLL_SEC)
             except KeyboardInterrupt: print("\n[STOP] Shutting down."); break

@@ -849,7 +849,8 @@ class TestGetCredential:
             result = get_credential()
 
         assert result is fake_cred
-        fake_cred.get_token.assert_called_once_with("https://management.azure.com/.default")
+        from global_manager import DATAVERSE_URL
+        fake_cred.get_token.assert_called_once_with(f"{DATAVERSE_URL}/.default")
 
     def test_raises_when_no_credentials_available(self):
         broken_cred = MagicMock()
