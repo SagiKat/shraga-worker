@@ -373,7 +373,7 @@ class IntegratedTaskWorker:
         # Support GUID, email in cr_userid, or email in crb3b_useremail
         filter_parts = [
             f"cr_status eq {_STATUS_INT[STATUS_PENDING]}",
-            f"(cr_userid eq '{self.current_user_id}' or cr_userid eq '{WEBHOOK_USER}' or crb3b_useremail eq '{WEBHOOK_USER}')",
+            f"(cr_userid eq '{self.current_user_id}' or cr_userid eq '{WEBHOOK_USER}' or crb3b_useremail eq '{WEBHOOK_USER}' or crb3b_useremail eq null)",
             f"(crb3b_devbox eq '{MACHINE_NAME}' or crb3b_devbox eq null)"
         ]
 
