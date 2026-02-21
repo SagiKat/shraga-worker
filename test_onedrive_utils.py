@@ -1,9 +1,10 @@
-"""Tests for onedrive_utils: suffix-based file/folder inference (GAP-I11 / T022).
+"""Tests for onedrive_utils: direct SharePoint URL generation.
 
 Tests:
-  - test_file_link_with_extension: file paths (with extension) produce URLs without &view=0
+  - test_file_link_with_extension: file paths produce direct document library URLs
   - test_file_link_without_local_file: file URLs are correct even when local file does not exist
-  - test_folder_link_for_directory: folder paths (no extension) produce URLs with &view=0
+  - test_folder_link_for_directory: folder paths produce direct document library URLs
+  - test_account_info_fallback: fallback method also produces direct URLs
 """
 import sys
 from pathlib import Path
@@ -86,36 +87,34 @@ class TestPathLooksLikeFile:
 # ===========================================================================
 
 class TestFileLinkWithExtension:
-    """File paths (with extension) must produce URLs WITHOUT &view=0."""
+    """File paths produce direct SharePoint document library URLs."""
 
     @patch("onedrive_utils.get_sync_engine_mappings", side_effect=_mock_sync_engines)
     @patch("onedrive_utils.get_onedrive_account_info", side_effect=_mock_no_accounts)
     def test_file_link_with_extension(self, _mock_acct, _mock_sync):
-        """A path like .../Sessions/task1/result.md should open the file, not a folder."""
+        """A path like .../Sessions/task1/result.md should produce a direct URL."""
         local_path = MOUNT_POINT + r"\Sessions\task1\result.md"
 
-        # Ensure the file does NOT need to exist on disk (we do not create it).
-        # The old code used Path.is_file() which would return False here.
         url = local_path_to_web_url(local_path, view_in_browser=True)
 
         assert url is not None
-        # File link should NOT have &view=0 (folder view param)
-        assert "&view=0" not in url
-        # Should contain the encoded file path
         assert "result.md" in url
-        assert "_layouts/15/onedrive.aspx" in url
+        # Direct URL format: https://host/personal/user/Documents/path
+        assert url.startswith("https://contoso-my.sharepoint.com/personal/testuser_contoso_com/Documents/")
+        # No _layouts indirection
+        assert "_layouts" not in url
 
     @patch("onedrive_utils.get_sync_engine_mappings", side_effect=_mock_sync_engines)
     @patch("onedrive_utils.get_onedrive_account_info", side_effect=_mock_no_accounts)
     def test_various_extensions(self, _mock_acct, _mock_sync):
-        """Multiple file types all produce file links (no &view=0)."""
+        """Multiple file types all produce direct URLs."""
         extensions = [".md", ".txt", ".py", ".json", ".pdf", ".docx", ".xlsx"]
         for ext in extensions:
             local_path = MOUNT_POINT + rf"\Sessions\task1\output{ext}"
             url = local_path_to_web_url(local_path, view_in_browser=True)
             assert url is not None, f"URL should not be None for {ext}"
-            assert "&view=0" not in url, (
-                f"File with extension {ext} should NOT have &view=0 but got: {url}"
+            assert "_layouts" not in url, (
+                f"File with extension {ext} should use direct URL, got: {url}"
             )
 
 
@@ -129,8 +128,7 @@ class TestFileLinkWithoutLocalFile:
     @patch("onedrive_utils.get_sync_engine_mappings", side_effect=_mock_sync_engines)
     @patch("onedrive_utils.get_onedrive_account_info", side_effect=_mock_no_accounts)
     def test_file_link_without_local_file(self, _mock_acct, _mock_sync):
-        """A non-existent local file should still get a correct file URL."""
-        # This path does NOT exist on disk
+        """A non-existent local file should still get a correct direct URL."""
         local_path = MOUNT_POINT + r"\Sessions\phantom\DELIVERABLES.md"
 
         assert not Path(local_path).exists(), (
@@ -140,10 +138,8 @@ class TestFileLinkWithoutLocalFile:
         url = local_path_to_web_url(local_path, view_in_browser=True)
 
         assert url is not None
-        # Must be a file link (no &view=0)
-        assert "&view=0" not in url
-        # Must contain the file name
         assert "DELIVERABLES.md" in url
+        assert "_layouts" not in url
 
     @patch("onedrive_utils.get_sync_engine_mappings", side_effect=_mock_sync_engines)
     @patch("onedrive_utils.get_onedrive_account_info", side_effect=_mock_no_accounts)
@@ -154,9 +150,9 @@ class TestFileLinkWithoutLocalFile:
         url = local_path_to_web_url(local_path, view_in_browser=True)
 
         assert url is not None
-        assert url.startswith(WEB_URL + "/_layouts/15/onedrive.aspx?id=")
-        # The encoded path should include Documents + relative path
-        assert "Documents" in url
+        # Direct URL: https://host/personal/user/Documents/Sessions/task42/report.pdf
+        expected_prefix = "https://contoso-my.sharepoint.com/personal/testuser_contoso_com/Documents/"
+        assert url.startswith(expected_prefix)
         assert "Sessions" in url
         assert "task42" in url
         assert "report.pdf" in url
@@ -167,54 +163,56 @@ class TestFileLinkWithoutLocalFile:
 # ===========================================================================
 
 class TestFolderLinkForDirectory:
-    """Folder paths (no extension) must produce URLs WITH &view=0."""
+    """Folder paths produce direct SharePoint document library URLs."""
 
     @patch("onedrive_utils.get_sync_engine_mappings", side_effect=_mock_sync_engines)
     @patch("onedrive_utils.get_onedrive_account_info", side_effect=_mock_no_accounts)
     def test_folder_link_for_directory(self, _mock_acct, _mock_sync):
-        """A path like .../Sessions/task1 (no extension) should open folder view."""
+        """A path like .../Sessions/task1 (no extension) should produce a direct URL."""
         local_path = MOUNT_POINT + r"\Sessions\task1"
 
         url = local_path_to_web_url(local_path, view_in_browser=True)
 
         assert url is not None
-        # Folder link MUST have &view=0
-        assert "&view=0" in url
-        assert "_layouts/15/onedrive.aspx" in url
+        assert "task1" in url
+        assert "_layouts" not in url
+        assert "&view=0" not in url
 
     @patch("onedrive_utils.get_sync_engine_mappings", side_effect=_mock_sync_engines)
     @patch("onedrive_utils.get_onedrive_account_info", side_effect=_mock_no_accounts)
     def test_root_folder_link(self, _mock_acct, _mock_sync):
-        """The mount point itself (root folder) should also get &view=0."""
+        """The mount point itself (root folder) should produce a direct URL."""
         url = local_path_to_web_url(MOUNT_POINT, view_in_browser=True)
 
         assert url is not None
-        assert "&view=0" in url
+        assert "_layouts" not in url
+        assert "&view=0" not in url
 
     @patch("onedrive_utils.get_sync_engine_mappings", side_effect=_mock_sync_engines)
     @patch("onedrive_utils.get_onedrive_account_info", side_effect=_mock_no_accounts)
     def test_nested_folder_link(self, _mock_acct, _mock_sync):
-        """Deeply nested folders still get &view=0."""
+        """Deeply nested folders produce direct URLs."""
         local_path = MOUNT_POINT + r"\Projects\2026\Sprint3\deliverables"
 
         url = local_path_to_web_url(local_path, view_in_browser=True)
 
         assert url is not None
-        assert "&view=0" in url
         assert "deliverables" in url
+        assert "_layouts" not in url
+        assert "&view=0" not in url
 
 
 # ===========================================================================
-# Fallback method 2: account info path (also uses suffix-based inference now)
+# Fallback method 2: account info path
 # ===========================================================================
 
 class TestAccountInfoFallbackFileVsFolder:
-    """Method 2 (account info fallback) should also distinguish file vs folder."""
+    """Method 2 (account info fallback) should also produce direct URLs."""
 
     @patch("onedrive_utils.get_sync_engine_mappings", return_value=[])
     @patch("onedrive_utils.get_onedrive_account_info")
-    def test_account_fallback_file_no_view_param(self, mock_accts, _mock_sync):
-        """Files via the account-info fallback should NOT have &view=0."""
+    def test_account_fallback_file_direct_url(self, mock_accts, _mock_sync):
+        """Files via the account-info fallback should produce direct URLs."""
         mock_accts.return_value = [
             OneDriveAccountInfo(
                 account_name="Business1",
@@ -228,12 +226,13 @@ class TestAccountInfoFallbackFileVsFolder:
         url = local_path_to_web_url(local_path, view_in_browser=True)
 
         assert url is not None
-        assert "&view=0" not in url
+        assert "_layouts" not in url
+        assert "output.json" in url
 
     @patch("onedrive_utils.get_sync_engine_mappings", return_value=[])
     @patch("onedrive_utils.get_onedrive_account_info")
-    def test_account_fallback_folder_has_view_param(self, mock_accts, _mock_sync):
-        """Folders via the account-info fallback should have &view=0."""
+    def test_account_fallback_folder_direct_url(self, mock_accts, _mock_sync):
+        """Folders via the account-info fallback should produce direct URLs."""
         mock_accts.return_value = [
             OneDriveAccountInfo(
                 account_name="Business1",
@@ -247,4 +246,6 @@ class TestAccountInfoFallbackFileVsFolder:
         url = local_path_to_web_url(local_path, view_in_browser=True)
 
         assert url is not None
-        assert "&view=0" in url
+        assert "_layouts" not in url
+        assert "&view=0" not in url
+        assert "task1" in url

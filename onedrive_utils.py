@@ -348,8 +348,9 @@ def local_path_to_web_url(
     local_path : str or Path
         Absolute local path to a synced file or folder.
     view_in_browser : bool
-        If True, returns a ``_layouts/15/onedrive.aspx`` URL that opens the
-        OneDrive web UI. If False, returns a direct SharePoint document URL.
+        If True, returns a direct SharePoint document library URL that opens
+        the file or folder in the OneDrive web UI. If False, returns a raw
+        SharePoint document URL.
 
     Returns
     -------
@@ -359,7 +360,7 @@ def local_path_to_web_url(
     Examples
     --------
     >>> local_path_to_web_url(r"C:\\Users\\sagik\\OneDrive - Microsoft\\Sessions\\task1\\result.md")
-    'https://microsofteur-my.sharepoint.com/personal/sagik_microsoft_com/_layouts/15/onedrive.aspx?id=/personal/sagik_microsoft_com/Documents/Sessions/task1/result.md'
+    'https://microsofteur-my.sharepoint.com/personal/sagik_microsoft_com/Documents/Sessions/task1/result.md'
     """
     local_path = Path(local_path).resolve()
     local_str = str(local_path)
@@ -383,25 +384,17 @@ def local_path_to_web_url(
         # The relative path is appended directly.
 
         if view_in_browser and mapping.web_url:
-            # Build _layouts/15/onedrive.aspx URL
-            web_url = mapping.web_url.rstrip("/")
-            # Extract the site-relative path from url_namespace
-            # e.g. url_ns = https://host/personal/user/Documents
-            #      web_url = https://host/personal/user
-            # site_relative_docs = /personal/user/Documents
+            # Build a direct SharePoint document library URL.
+            # Previous approach used _layouts/15/onedrive.aspx?id=...&view=0
+            # which caused "empty folder" rendering issues in OneDrive web UI.
+            # Direct URLs (https://host/personal/user/Documents/path) work
+            # reliably for both files and folders.
             parsed = urllib.parse.urlparse(url_ns)
             doc_path = parsed.path.rstrip("/")  # /personal/user/Documents
             full_path = f"{doc_path}/{relative}" if relative else doc_path
 
-            # Determine if it's a file or folder using suffix-based
-            # inference so this works even when the local file hasn't
-            # synced yet (avoids the is_file() filesystem race).
-            is_file = _path_looks_like_file(local_path)
-
             encoded_path = urllib.parse.quote(full_path)
-            result_url = f"{web_url}/_layouts/15/onedrive.aspx?id={encoded_path}"
-            if not is_file:
-                result_url += "&view=0"
+            result_url = f"{parsed.scheme}://{parsed.netloc}{encoded_path}"
             return result_url
         else:
             # Direct document URL
@@ -428,11 +421,8 @@ def local_path_to_web_url(
         doc_path = f"{site_path}/Documents/{relative}" if relative else f"{site_path}/Documents"
 
         if view_in_browser:
-            is_file = _path_looks_like_file(local_path)
             encoded = urllib.parse.quote(doc_path)
-            result_url = f"{parsed.scheme}://{parsed.netloc}{site_path}/_layouts/15/onedrive.aspx?id={encoded}"
-            if not is_file:
-                result_url += "&view=0"
+            result_url = f"{parsed.scheme}://{parsed.netloc}{encoded}"
             return result_url
         else:
             encoded_relative = urllib.parse.quote(relative)

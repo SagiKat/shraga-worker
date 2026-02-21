@@ -399,7 +399,7 @@ class TestResultFormatting:
         session_folder = onedrive_root / "Shraga Sessions" / "test_task_abc12345"
         session_folder.mkdir(parents=True)
 
-        fake_web_url = "https://contoso-my.sharepoint.com/personal/user/_layouts/15/onedrive.aspx?id=/personal/user/Documents/Shraga%20Sessions/test_task"
+        fake_web_url = "https://contoso-my.sharepoint.com/personal/user/Documents/Shraga%20Sessions/test_task"
 
         # Mock all external dependencies needed by execute_with_autonomous_agent
         mock_agent_instance = MagicMock()
