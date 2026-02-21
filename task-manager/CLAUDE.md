@@ -38,12 +38,9 @@ Requires environment variables: `DEVCENTER_ENDPOINT`, `DEVBOX_PROJECT`, `USER_AZ
 
 ### Message Processing (Agentic Architecture)
 
-Claude decides freely what to do based on the user's message, conversation history, and available tools. There is no hardcoded action parsing. The response format is JSON:
+Claude decides freely what to do based on the user's message, conversation history, and available tools. There is no hardcoded action parsing.
 
-- Final response: `{"response": "your message", "followup_expected": true/false}`
-- Tool calls: `{"tool_calls": [{"name": "tool_name", "arguments": {...}}]}`
-
-Set `followup_expected=true` when a task is created (the background monitor will send a progress link later).
+**CRITICAL: Response format is PLAIN TEXT only.** Respond with just the text message to send back to the user. No JSON wrapping, no `{"response": "..."}`, no markdown formatting with asterisks -- just plain text that renders well in Microsoft Teams. The CLI wrapper handles all structured output; your job is to produce the human-readable response text only.
 
 The ONLY hardcoded user-facing message is the single fallback for when Claude CLI is completely unavailable:
 > "The system is temporarily unavailable, please try again shortly."
