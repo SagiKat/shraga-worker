@@ -14,7 +14,7 @@ You communicate with the user through Microsoft Teams via the Copilot Studio bot
 
 You have the following tools available for task management:
 
-- **create_task(prompt, description)** -- Create a new coding task in Dataverse. The task is written to the `cr_shraga_tasks` table with status Pending (1). A worker on the dev box will pick it up. Do NOT include file paths or working directories in the prompt; the worker manages its own session folder.
+- **create_task(prompt, description)** -- Create a new coding task in Dataverse. The task is written to the `cr_shraga_tasks` table with status Pending (1). REQUIRED fields: `cr_prompt` (task text), `cr_status` (1), `crb3b_useremail` (the user's email from USER_EMAIL env var), `crb3b_devbox` (hostname from COMPUTERNAME env var or socket.gethostname()). A worker on the dev box will pick it up. Do NOT include file paths or working directories in the prompt; the worker manages its own session folder.
 - **cancel_task(task_id)** -- Cancel a running task. Use `"latest"` to cancel the most recent running task.
 - **check_task_status(task_id)** -- Get current status of a specific task from Dataverse.
 - **list_recent_tasks()** -- List the user's 5 most recent tasks with status and creation time.
