@@ -36,7 +36,7 @@ DEVBOX_SETUP_SCRIPT = textwrap.dedent(r"""
     # 2. Clone the shraga-worker repo
     Write-Host "`n[2/3] Cloning shraga-worker repo..." -ForegroundColor Yellow
     if (-not (Test-Path "C:\Dev\shraga-worker")) {
-        git clone https://msazure.visualstudio.com/DefaultCollection/CCI/_git/Users --branch users/sagik/shraga-worker C:\Dev\shraga-worker
+        git clone https://github.com/SagiKat/shraga-worker.git C:\Dev\shraga-worker
     } else {
         Write-Host "  Repo already exists at C:\Dev\shraga-worker -- pulling latest..."
         Push-Location C:\Dev\shraga-worker
@@ -45,22 +45,69 @@ DEVBOX_SETUP_SCRIPT = textwrap.dedent(r"""
     }
 
     # 3. Create the scheduled task for the worker
+    # Unified config: user-level, Interactive logon, AtStartup, RestartCount 3,
+    # RestartInterval 1 min (matches devbox-customization-shraga.yaml gold standard)
     Write-Host "`n[3/3] Creating scheduled task..." -ForegroundColor Yellow
-    $action  = New-ScheduledTaskAction -Execute "python" `
+    $action  = New-ScheduledTaskAction -Execute "C:\Python312\python.exe" `
         -Argument "C:\Dev\shraga-worker\integrated_task_worker.py" `
         -WorkingDirectory "C:\Dev\shraga-worker"
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" `
+        -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries -RestartCount 3 `
+        -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 `
         -RestartInterval (New-TimeSpan -Minutes 1)
 
     Register-ScheduledTask -TaskName "ShragaWorker" `
-        -Action $action -Trigger $trigger -Settings $settings `
+        -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
         -Description "Shraga integrated task worker" `
-        -RunLevel Highest -Force | Out-Null
+        -Force | Out-Null
 
     Write-Host "`nSetup complete! Now run:  claude /login" -ForegroundColor Green
 """).strip()
+
+
+# ---------------------------------------------------------------------------
+# Shared auth instructions template (used by both GM and PM)
+# ---------------------------------------------------------------------------
+# This is the single source of truth for post-provisioning auth instructions.
+# Both the Global Manager (via get_rdp_auth_message tool) and the Personal
+# Manager (via provision_devbox tool) MUST use this exact text to ensure
+# users receive identical instructions regardless of which manager handles
+# their onboarding.
+
+AUTH_INSTRUCTIONS_TEMPLATE = (
+    "Your dev box is ready! Please complete setup:\n\n"
+    "Step 1 -- Connect to your dev box:\n"
+    "Open this link in your browser: {connection_url}\n\n"
+    "Step 2 -- Authenticate:\n"
+    "Double-click the Shraga-Authenticate shortcut on the desktop. "
+    "It will run az login (browser sign-in) and claude /login "
+    "(device code auth). Follow the prompts for both.\n\n"
+    "Once you have completed these steps, reply here with done "
+    "and I will verify everything is set up."
+)
+
+
+def build_auth_instructions(connection_url: str) -> str:
+    """Build the post-provisioning auth instructions for a given connection URL.
+
+    This is the canonical function both GM and PM should use to generate
+    auth instructions.  It ensures the user always receives the same message
+    format regardless of which manager handles their onboarding.
+
+    The message includes:
+    - The web RDP connection URL
+    - Instructions to use the Shraga-Authenticate desktop shortcut
+    - A prompt to reply 'done' when finished
+
+    Args:
+        connection_url: The web RDP URL for the user's dev box.
+
+    Returns:
+        The formatted auth instructions string.
+    """
+    return AUTH_INSTRUCTIONS_TEMPLATE.format(connection_url=connection_url)
 
 
 class ClaudeAuthManager:
@@ -233,18 +280,12 @@ class RemoteDevBoxAuth:
         return url
 
     def build_auth_message(self, connection_url: str) -> str:
-        """Build the Teams message that guides the user through dev box auth."""
-        return (
-            "Your dev box is ready! Please complete setup:\n\n"
-            "Step 1 -- Connect to your dev box:\n"
-            f"Open this link in your browser: {connection_url}\n\n"
-            "Step 2 -- Authenticate:\n"
-            "Double-click the Shraga-Authenticate shortcut on the desktop. "
-            "It will run az login (browser sign-in) and claude /login "
-            "(device code auth). Follow the prompts for both.\n\n"
-            "Once you have completed these steps, reply here with done "
-            "and I will verify everything is set up."
-        )
+        """Build the Teams message that guides the user through dev box auth.
+
+        Delegates to the module-level ``build_auth_instructions`` function
+        so that both GM and PM always produce identical output.
+        """
+        return build_auth_instructions(connection_url)
 
     def build_setup_script_message(self) -> str:
         """Build a standalone message containing just the setup script."""

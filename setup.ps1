@@ -40,6 +40,15 @@ if ($LASTEXITCODE -ne 0) {
 $userEmail = az account show --query "user.name" -o tsv
 Write-Host "  Signed in as: $userEmail" -ForegroundColor Green
 
+# Set USER_EMAIL and WORKING_DIR environment variables for the orchestrating machine
+$WorkingDir = "C:\Dev\shraga-worker"
+[System.Environment]::SetEnvironmentVariable("USER_EMAIL", $userEmail, "User")
+$env:USER_EMAIL = $userEmail
+[System.Environment]::SetEnvironmentVariable("WORKING_DIR", $WorkingDir, "User")
+$env:WORKING_DIR = $WorkingDir
+Write-Host "  USER_EMAIL set to: $userEmail" -ForegroundColor Gray
+Write-Host "  WORKING_DIR set to: $WorkingDir" -ForegroundColor Gray
+
 # Step 2: Find next available dev box name (shraga-box-01, 02, 03...)
 Write-Host ""
 Write-Host "[2/6] Finding next available dev box..." -ForegroundColor Yellow
@@ -122,7 +131,7 @@ Write-Host ""
 Write-Host "[5/6] Deploying code and worker..." -ForegroundColor Yellow
 $headers = Get-DevCenterToken
 
-$deployBody = '{"tasks":[{"name":"DevBox.Catalog/powershell","parameters":{"command":"powercfg /change monitor-timeout-ac 0; powercfg /change standby-timeout-ac 0; powercfg /change hibernate-timeout-ac 0; powercfg /change disk-timeout-ac 0; powercfg /hibernate off; reg add ''HKLM\\\\SOFTWARE\\\\Policies\\\\Microsoft\\\\Windows NT\\\\Terminal Services'' /v fResetBroken /t REG_DWORD /d 0 /f; & ''C:\\\\Program Files\\\\Git\\\\cmd\\\\git.exe'' clone --single-branch --depth 1 https://github.com/SagiKat/shraga-worker.git ''C:\\\\Dev\\\\shraga-worker''; & ''C:\\\\Python312\\\\python.exe'' -m pip install requests azure-identity azure-core watchdog; $action = New-ScheduledTaskAction -Execute ''C:\\\\Python312\\\\python.exe'' -Argument ''C:\\\\Dev\\\\shraga-worker\\\\integrated_task_worker.py'' -WorkingDirectory ''C:\\\\Dev\\\\shraga-worker''; $trigger = New-ScheduledTaskTrigger -AtStartup; Register-ScheduledTask -TaskName ''ShragaWorker'' -Action $action -Trigger $trigger -User ''SYSTEM'' -RunLevel Highest -Force; Invoke-WebRequest -Uri ''https://raw.githubusercontent.com/SagiKat/shraga-worker/main/authenticate.ps1'' -OutFile ''C:\\\\Users\\\\Public\\\\Desktop\\\\Shraga-Authenticate.ps1''; $ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut(''C:\\\\Users\\\\Public\\\\Desktop\\\\Shraga-Authenticate.lnk''); $sc.TargetPath = ''powershell.exe''; $sc.Arguments = ''-ExecutionPolicy Bypass -File C:\\\\Users\\\\Public\\\\Desktop\\\\Shraga-Authenticate.ps1''; $sc.Save()"}}]'
+$deployBody = '{"tasks":[{"name":"DevBox.Catalog/powershell","parameters":{"command":"powercfg /change monitor-timeout-ac 0; powercfg /change standby-timeout-ac 0; powercfg /change hibernate-timeout-ac 0; powercfg /change disk-timeout-ac 0; powercfg /hibernate off; reg add ''HKLM\\\\SOFTWARE\\\\Policies\\\\Microsoft\\\\Windows NT\\\\Terminal Services'' /v fResetBroken /t REG_DWORD /d 0 /f; & ''C:\\\\Program Files\\\\Git\\\\cmd\\\\git.exe'' clone --single-branch --depth 1 https://github.com/SagiKat/shraga-worker.git ''C:\\\\Dev\\\\shraga-worker''; & ''C:\\\\Python312\\\\python.exe'' -m pip install requests azure-identity azure-core watchdog; [System.Environment]::SetEnvironmentVariable(''WORKING_DIR'', ''C:\\\\Dev\\\\shraga-worker'', ''Machine''); $action = New-ScheduledTaskAction -Execute ''C:\\\\Python312\\\\python.exe'' -Argument ''C:\\\\Dev\\\\shraga-worker\\\\integrated_task_worker.py'' -WorkingDirectory ''C:\\\\Dev\\\\shraga-worker''; $trigger = New-ScheduledTaskTrigger -AtStartup; $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited; $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1); Register-ScheduledTask -TaskName ''ShragaWorker'' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force; Invoke-WebRequest -Uri ''https://raw.githubusercontent.com/SagiKat/shraga-worker/main/authenticate.ps1'' -OutFile ''C:\\\\Users\\\\Public\\\\Desktop\\\\Shraga-Authenticate.ps1''; $ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut(''C:\\\\Users\\\\Public\\\\Desktop\\\\Shraga-Authenticate.lnk''); $sc.TargetPath = ''powershell.exe''; $sc.Arguments = ''-ExecutionPolicy Bypass -File C:\\\\Users\\\\Public\\\\Desktop\\\\Shraga-Authenticate.ps1''; $sc.Save()"}}]'
 
 try {
     Invoke-RestMethod -Method Put `

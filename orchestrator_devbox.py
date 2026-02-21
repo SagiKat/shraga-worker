@@ -3,13 +3,23 @@ Dev Box management functions for Shraga Orchestrator
 Handles provisioning, authentication, and remote command execution
 """
 
+import re
 import requests
 import time
 import json
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone, timedelta
-from azure.identity import DefaultAzureCredential, DeviceCodeCredential
+from azure.identity import DefaultAzureCredential
 from dataclasses import dataclass
+
+# ---------------------------------------------------------------------------
+# Shared deployment URLs — centralised so every provisioning path references
+# the same GitHub-hosted location.  NO personal OneDrive / 1drv.ms links.
+# ---------------------------------------------------------------------------
+SHRAGA_REPO_URL = "https://github.com/SagiKat/shraga-worker"
+SHRAGA_ZIP_URL = f"{SHRAGA_REPO_URL}/archive/refs/heads/main.zip"
+SHRAGA_AUTH_SCRIPT_URL = f"https://raw.githubusercontent.com/SagiKat/shraga-worker/main/authenticate.ps1"
+SHRAGA_DEPLOY_DIR = r"C:\Dev\shraga-worker"
 
 
 @dataclass
@@ -28,25 +38,24 @@ class DevBoxManager:
         self,
         devcenter_endpoint: str,
         project_name: str,
-        pool_name: str = "shraga-worker-pool",
-        use_device_code: bool = False,
+        pool_name: str = "botdesigner-pool-italynorth",
         credential=None,
     ):
         self.devcenter_endpoint = devcenter_endpoint
         self.project_name = project_name
         self.pool_name = pool_name
 
-        # Use externally-provided credential if given (enables process-scoped auth)
+        # Use externally-provided credential if given (enables process-scoped auth).
+        # Otherwise fall back to the default credential chain (env vars, managed
+        # identity, Azure CLI, etc.).
+        #
+        # NOTE: Device code auth was removed because Azure Conditional Access
+        # policies block the device code grant flow in this tenant.  Run
+        # ``az login`` before using DevBoxManager if no managed identity is
+        # available.  See also orchestrator_auth_devicecode.py (deprecated).
         if credential is not None:
             self.credential = credential
-        elif use_device_code:
-            print("🔐 Using device code authentication...")
-            self.credential = DeviceCodeCredential(
-                tenant_id="common",
-                prompt_callback=self._device_code_callback
-            )
         else:
-            # Try default credential chain (env vars, managed identity, Azure CLI, etc.)
             self.credential = DefaultAzureCredential()
 
         self.api_version = "2024-02-01"
@@ -54,17 +63,6 @@ class DevBoxManager:
         # Token caching
         self._token_cache = None
         self._token_expires = None
-
-    def _device_code_callback(self, verification_uri: str, user_code: str, expires_in: int):
-        """Display device code instructions"""
-        print("\n" + "=" * 60)
-        print("📱 AUTHENTICATION REQUIRED")
-        print("=" * 60)
-        print(f"\n1. Open: {verification_uri}")
-        print(f"2. Enter code: {user_code}")
-        print(f"3. Expires in: {expires_in // 60} minutes")
-        print("\n💡 You can do this on your phone!")
-        print("=" * 60 + "\n")
 
     def _get_token(self) -> str:
         """Get access token for Dev Center API (cached)"""
@@ -91,20 +89,90 @@ class DevBoxManager:
             "User-Agent": "Shraga-DevBoxManager/1.0",
         }
 
-    def provision_devbox(self, user_azure_ad_id: str, user_email: str) -> Dict[str, Any]:
+    def list_devboxes(self, user_azure_ad_id: str) -> List[Dict[str, Any]]:
+        """
+        List all Dev Boxes for a specific user.
+
+        Args:
+            user_azure_ad_id: Azure AD object ID of the user
+
+        Returns:
+            List of dev box dicts from the DevCenter API
+        """
+        url = (
+            f"{self.devcenter_endpoint}/projects/{self.project_name}"
+            f"/users/{user_azure_ad_id}/devboxes"
+        )
+
+        response = requests.get(
+            url,
+            headers=self._get_headers(),
+            params={"api-version": self.api_version},
+            timeout=30,
+        )
+
+        if response.status_code == 200:
+            return response.json().get("value", [])
+        else:
+            raise Exception(
+                f"Failed to list Dev Boxes: {response.status_code} {response.text}"
+            )
+
+    def next_devbox_name(self, user_azure_ad_id: str) -> str:
+        """
+        Find the next available dev box name using the shraga-box-{NN} convention.
+
+        Queries the DevCenter API for existing dev boxes, finds all names matching
+        the shraga-box-{NN} pattern, extracts the used numbers, and returns the
+        first available name (filling gaps). The number is zero-padded to 2 digits.
+
+        This mirrors the logic from setup.ps1 lines 43-56.
+
+        Args:
+            user_azure_ad_id: Azure AD object ID of the user
+
+        Returns:
+            Next available name, e.g. "shraga-box-01", "shraga-box-02", etc.
+        """
+        existing_boxes = self.list_devboxes(user_azure_ad_id)
+
+        # Extract numbers from shraga-box-{NN} names
+        pattern = re.compile(r"^shraga-box-(\d+)$")
+        used_numbers: set[int] = set()
+        for box in existing_boxes:
+            name = box.get("name", "")
+            match = pattern.match(name)
+            if match:
+                used_numbers.add(int(match.group(1)))
+
+        # Find the first available number starting at 1 (fill gaps)
+        next_num = 1
+        while next_num in used_numbers:
+            next_num += 1
+
+        return f"shraga-box-{next_num:02d}"
+
+    def provision_devbox(
+        self,
+        user_azure_ad_id: str,
+        user_email: str,
+        devbox_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Provision a Dev Box for a specific user
 
         Args:
             user_azure_ad_id: Azure AD object ID of the user
-            user_email: User's email (for naming)
+            user_email: User's email (used for logging, not for naming)
+            devbox_name: Explicit Dev Box name.  When *None* (default), the
+                next available ``shraga-box-NN`` name is chosen automatically.
 
         Returns:
             Dict with provisioning details
         """
-        # Generate dev box name from email
-        username = user_email.split('@')[0].replace('.', '-')
-        devbox_name = f"shraga-{username}"
+        # Use the explicit name when provided; otherwise auto-increment.
+        if devbox_name is None:
+            devbox_name = self.next_devbox_name(user_azure_ad_id)
 
         # API endpoint
         url = (
@@ -225,7 +293,7 @@ class DevBoxManager:
         self,
         user_azure_ad_id: str,
         devbox_name: str,
-        timeout_minutes: int = 15
+        timeout_minutes: int = 35
     ) -> DevBoxInfo:
         """
         Wait for Dev Box provisioning to complete
@@ -289,7 +357,7 @@ class DevBoxManager:
         url = (
             f"{self.devcenter_endpoint}/projects/{self.project_name}"
             f"/users/{user_azure_ad_id}/devboxes/{devbox_name}"
-            f"/customizationGroups/shraga-setup"
+            f"/customizationGroups/shraga-tools"
         )
 
         body = {
@@ -325,7 +393,7 @@ class DevBoxManager:
             # Customization group already exists (e.g., re-applying to an
             # already-customized box).  Treat as success.
             print(f"Customization group already exists on {devbox_name}, skipping")
-            return {"status": "AlreadyExists", "name": "shraga-setup"}
+            return {"status": "AlreadyExists", "name": "shraga-tools"}
         else:
             raise Exception(
                 f"Failed to apply customizations: {response.status_code} {response.text}"
@@ -350,7 +418,7 @@ class DevBoxManager:
         url = (
             f"{self.devcenter_endpoint}/projects/{self.project_name}"
             f"/users/{user_azure_ad_id}/devboxes/{devbox_name}"
-            f"/customizationGroups/shraga-setup"
+            f"/customizationGroups/shraga-tools"
         )
 
         response = requests.get(
@@ -380,6 +448,24 @@ class DevBoxManager:
 
         Installs: repo clone, pip packages, ShragaWorker scheduled task,
         and the Shraga-Authenticate desktop shortcut.
+
+        IMPORTANT -- Python PATH limitations (per DEVBOX_CUSTOMIZATION_FINDINGS
+        2026-02-16):
+
+        - Python is installed via ``choco`` (winget fails with InstallerErrorCode 3
+          in system context).
+        - After choco install, Python is NOT on PATH in the system customization
+          context.  The standard ``C:\\Python312\\python.exe`` path does not exist;
+          choco installs to ``C:\\Python312`` only when using the official installer,
+          but the choco ``python312`` package places the binary under the
+          Chocolatey lib directory.
+        - This script resolves the Python executable dynamically by searching
+          well-known choco and system install locations.
+        - ``runAs: User`` tasks block on ``WaitingForUserSession`` and are
+          therefore not usable for fully automated provisioning.
+        - pip packages may still fail if Python cannot be found.  The recommended
+          fallback is to install pip packages via Playwright-controlled RDP
+          after first user login, or to bake them into the dev box image.
         """
         url = (
             f"{self.devcenter_endpoint}/projects/{self.project_name}"
@@ -388,6 +474,20 @@ class DevBoxManager:
         )
 
         # Single powershell task matching setup.ps1 Step 5
+        # Scheduled task uses user-level principal ($env:USERNAME), Interactive
+        # logon, AtStartup trigger, RestartCount 3, RestartInterval 1 min --
+        # unified with devbox-customization-shraga.yaml gold standard.
+        #
+        # Code deployment uses the GitHub release ZIP instead of ``git clone``
+        # so that (a) Git does not need to be on PATH yet when this runs,
+        # (b) the download is a single deterministic archive, and (c) no
+        # personal OneDrive / 1drv.ms URLs are referenced anywhere.
+        #
+        # Python path resolution: choco installs python312 to a location that
+        # is NOT C:\Python312.  We search several well-known locations and
+        # fall back to PATH-based "python" if none are found.  The pip install
+        # and scheduled task both use the resolved $pyExe variable.
+        deploy_dir_ps = SHRAGA_DEPLOY_DIR.replace("\\", "\\\\")
         deploy_command = (
             "powercfg /change monitor-timeout-ac 0; "
             "powercfg /change standby-timeout-ac 0; "
@@ -396,17 +496,45 @@ class DevBoxManager:
             "powercfg /hibernate off; "
             "reg add 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services' "
             "/v fResetBroken /t REG_DWORD /d 0 /f; "
-            "& 'C:\\Program Files\\Git\\cmd\\git.exe' clone --single-branch --depth 1 "
-            "https://github.com/SagiKat/shraga-worker.git 'C:\\Dev\\shraga-worker'; "
-            "& 'C:\\Python312\\python.exe' -m pip install requests azure-identity azure-core watchdog; "
-            "$action = New-ScheduledTaskAction -Execute 'C:\\Python312\\python.exe' "
-            "-Argument 'C:\\Dev\\shraga-worker\\integrated_task_worker.py' "
-            "-WorkingDirectory 'C:\\Dev\\shraga-worker'; "
+            f"New-Item -ItemType Directory -Force -Path '{deploy_dir_ps}' | Out-Null; "
+            f"Invoke-WebRequest -Uri '{SHRAGA_ZIP_URL}' "
+            f"-OutFile '$env:TEMP\\shraga-worker.zip'; "
+            f"Expand-Archive -Path '$env:TEMP\\shraga-worker.zip' "
+            f"-DestinationPath '$env:TEMP\\shraga-worker-extract' -Force; "
+            f"Copy-Item -Path '$env:TEMP\\shraga-worker-extract\\shraga-worker-main\\*' "
+            f"-Destination '{deploy_dir_ps}' -Recurse -Force; "
+            f"Remove-Item '$env:TEMP\\shraga-worker.zip' -Force -ErrorAction SilentlyContinue; "
+            f"Remove-Item '$env:TEMP\\shraga-worker-extract' -Recurse -Force -ErrorAction SilentlyContinue; "
+            # Resolve Python executable from choco or standard install locations
+            "$pyExe = $null; "
+            "$pyCandidates = @("
+            "'C:\\Python312\\python.exe', "
+            "'C:\\ProgramData\\chocolatey\\lib\\python312\\tools\\python.exe', "
+            "'C:\\ProgramData\\chocolatey\\bin\\python3.exe', "
+            "'C:\\ProgramData\\chocolatey\\bin\\python.exe'"
+            "); "
+            "foreach ($c in $pyCandidates) { "
+            "if (Test-Path $c) { $pyExe = $c; break } "
+            "}; "
+            "if (-not $pyExe) { $pyExe = (Get-Command python -ErrorAction SilentlyContinue).Source }; "
+            "if (-not $pyExe) { "
+            "Write-Warning 'Python not found in any known location. pip install and scheduled task will fail.'; "
+            "$pyExe = 'python' "
+            "}; "
+            "Write-Host \"Using Python: $pyExe\"; "
+            "& $pyExe -m pip install requests azure-identity azure-core watchdog; "
+            "$action = New-ScheduledTaskAction -Execute $pyExe "
+            f"-Argument '{deploy_dir_ps}\\integrated_task_worker.py' "
+            f"-WorkingDirectory '{deploy_dir_ps}'; "
             "$trigger = New-ScheduledTaskTrigger -AtStartup; "
+            "$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME "
+            "-LogonType Interactive -RunLevel Limited; "
+            "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries "
+            "-DontStopIfGoingOnBatteries -StartWhenAvailable "
+            "-RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1); "
             "Register-ScheduledTask -TaskName 'ShragaWorker' -Action $action "
-            "-Trigger $trigger -User 'SYSTEM' -RunLevel Highest -Force; "
-            "Invoke-WebRequest -Uri "
-            "'https://raw.githubusercontent.com/SagiKat/shraga-worker/main/authenticate.ps1' "
+            "-Trigger $trigger -Principal $principal -Settings $settings -Force; "
+            f"Invoke-WebRequest -Uri '{SHRAGA_AUTH_SCRIPT_URL}' "
             "-OutFile 'C:\\Users\\Public\\Desktop\\Shraga-Authenticate.ps1'; "
             "$ws = New-Object -ComObject WScript.Shell; "
             "$sc = $ws.CreateShortcut('C:\\Users\\Public\\Desktop\\Shraga-Authenticate.lnk'); "
@@ -559,38 +687,255 @@ class DevBoxManager:
         # For now, return False (assume not authenticated)
         return False
 
+    def delete_devbox(self, user_azure_ad_id: str, devbox_name: str) -> None:
+        """
+        Delete a Dev Box.
 
-# Example usage
-if __name__ == "__main__":
-    # Configuration
-    DEVCENTER_ENDPOINT = "https://your-devcenter.devcenter.azure.com"
-    PROJECT_NAME = "shraga-project"
-    POOL_NAME = "shraga-worker-pool"
+        Sends an HTTP DELETE to the DevCenter API to permanently remove the
+        specified Dev Box.  The operation is asynchronous on the server side;
+        this method returns once the API has accepted the request.
 
-    # Initialize manager
+        Args:
+            user_azure_ad_id: Azure AD object ID of the user
+            devbox_name: Name of the Dev Box to delete
+        """
+        url = (
+            f"{self.devcenter_endpoint}/projects/{self.project_name}"
+            f"/users/{user_azure_ad_id}/devboxes/{devbox_name}"
+        )
+
+        response = requests.delete(
+            url,
+            headers=self._get_headers(),
+            params={"api-version": self.api_version},
+            timeout=30,
+        )
+
+        if response.status_code in [200, 202, 204]:
+            print(f"[OK] Dev Box '{devbox_name}' deletion accepted.")
+        elif response.status_code == 404:
+            print(f"[WARN] Dev Box '{devbox_name}' not found (already deleted?).")
+        else:
+            raise Exception(
+                f"Failed to delete Dev Box '{devbox_name}': "
+                f"{response.status_code} {response.text}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# CLI entry-point
+# ---------------------------------------------------------------------------
+
+def _build_parser() -> "argparse.ArgumentParser":
+    """Build the argparse parser with all subcommands.
+
+    Separated from ``if __name__`` so that tests can import and exercise the
+    parser without running the whole script.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="orchestrator_devbox",
+        description="Shraga Dev Box Manager CLI -- provision, manage, and "
+                    "connect to Microsoft Dev Boxes.",
+    )
+
+    # Common arguments shared by (almost) all subcommands
+    parser.add_argument(
+        "--endpoint",
+        default=None,
+        help="DevCenter endpoint URL (or set DEVCENTER_ENDPOINT env var).",
+    )
+    parser.add_argument(
+        "--project",
+        default=None,
+        help="DevCenter project name (or set DEVCENTER_PROJECT env var).",
+    )
+    parser.add_argument(
+        "--pool",
+        default="botdesigner-pool-italynorth",
+        help="DevCenter pool name (default: botdesigner-pool-italynorth).",
+    )
+    parser.add_argument(
+        "--user-id",
+        default=None,
+        help="Azure AD object ID of the user (or set AZURE_USER_ID env var).",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # -- provision ----------------------------------------------------------
+    sp_provision = subparsers.add_parser(
+        "provision",
+        help="Provision a new Dev Box for a user.",
+    )
+    sp_provision.add_argument(
+        "--name",
+        default=None,
+        help="Dev Box name. If omitted, the next available shraga-box-NN "
+             "name is chosen automatically.",
+    )
+    sp_provision.add_argument(
+        "--email",
+        default="user@example.com",
+        help="User email (used for logging only).",
+    )
+
+    # -- status -------------------------------------------------------------
+    sp_status = subparsers.add_parser(
+        "status",
+        help="Get the current status of a Dev Box.",
+    )
+    sp_status.add_argument(
+        "--name",
+        required=True,
+        help="Name of the Dev Box.",
+    )
+
+    # -- customize ----------------------------------------------------------
+    sp_customize = subparsers.add_parser(
+        "customize",
+        help="Apply standard Shraga customizations (Git, Claude Code, Python) "
+             "to a Dev Box.",
+    )
+    sp_customize.add_argument(
+        "--name",
+        required=True,
+        help="Name of the Dev Box.",
+    )
+
+    # -- connect ------------------------------------------------------------
+    sp_connect = subparsers.add_parser(
+        "connect",
+        help="Get the web RDP connection URL for a Dev Box.",
+    )
+    sp_connect.add_argument(
+        "--name",
+        required=True,
+        help="Name of the Dev Box.",
+    )
+
+    # -- delete -------------------------------------------------------------
+    sp_delete = subparsers.add_parser(
+        "delete",
+        help="Delete a Dev Box.",
+    )
+    sp_delete.add_argument(
+        "--name",
+        required=True,
+        help="Name of the Dev Box to delete.",
+    )
+
+    # -- list ---------------------------------------------------------------
+    subparsers.add_parser(
+        "list",
+        help="List all Dev Boxes for the user.",
+    )
+
+    return parser
+
+
+def _resolve_common_args(args) -> tuple:
+    """Resolve endpoint / project / user-id from CLI flags or env vars.
+
+    Returns (endpoint, project, pool, user_id).  Raises SystemExit with a
+    helpful message when a required value is missing.
+    """
+    import os as _os
+    import sys as _sys
+
+    endpoint = args.endpoint or _os.environ.get("DEVCENTER_ENDPOINT")
+    project = args.project or _os.environ.get("DEVCENTER_PROJECT")
+    pool = args.pool
+    user_id = args.user_id or _os.environ.get("AZURE_USER_ID")
+
+    missing = []
+    if not endpoint:
+        missing.append("--endpoint / DEVCENTER_ENDPOINT")
+    if not project:
+        missing.append("--project / DEVCENTER_PROJECT")
+    if not user_id:
+        missing.append("--user-id / AZURE_USER_ID")
+
+    if missing:
+        _sys.stderr.write(
+            f"Error: the following required values are missing: "
+            f"{', '.join(missing)}\n"
+        )
+        _sys.exit(1)
+
+    return endpoint, project, pool, user_id
+
+
+def cli_main(argv: Optional[List[str]] = None) -> int:
+    """Run the CLI.  Returns an integer exit code (0 = success).
+
+    Parameters
+    ----------
+    argv : list of str, optional
+        Command-line arguments.  If *None*, ``sys.argv[1:]`` is used.  Passing
+        an explicit list makes the function easy to test without monkeypatching
+        ``sys.argv``.
+    """
+    import sys as _sys
+
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if not args.command:
+        parser.print_help()
+        return 1
+
+    endpoint, project, pool, user_id = _resolve_common_args(args)
+
     manager = DevBoxManager(
-        devcenter_endpoint=DEVCENTER_ENDPOINT,
-        project_name=PROJECT_NAME,
-        pool_name=POOL_NAME
+        devcenter_endpoint=endpoint,
+        project_name=project,
+        pool_name=pool,
     )
 
-    # Example: Provision Dev Box
-    user_azure_ad_id = "b08e39b4-2ac6-4465-a35e-48322efb0f98"
-    user_email = "user@microsoft.com"
+    # ----- dispatch --------------------------------------------------------
 
-    # Provision
-    result = manager.provision_devbox(user_azure_ad_id, user_email)
-    devbox_name = result["name"]
+    if args.command == "provision":
+        result = manager.provision_devbox(
+            user_id, args.email, devbox_name=args.name,
+        )
+        print(json.dumps(result, indent=2))
 
-    # Wait for provisioning
-    info = manager.wait_for_provisioning(user_azure_ad_id, devbox_name)
+    elif args.command == "status":
+        info = manager.get_devbox_status(user_id, args.name)
+        print(json.dumps({
+            "name": info.name,
+            "user_id": info.user_id,
+            "status": info.status,
+            "connection_url": info.connection_url,
+            "provisioning_state": info.provisioning_state,
+        }, indent=2))
 
-    # Request authentication
-    connection_url = manager.request_kiosk_auth(
-        user_id="dataverse-user-id",
-        user_email=user_email,
-        devbox_name=devbox_name,
-        user_azure_ad_id=user_azure_ad_id
-    )
+    elif args.command == "customize":
+        result = manager.apply_customizations(user_id, args.name)
+        print(json.dumps(result, indent=2))
 
-    print(f"Send this URL to user: {connection_url}")
+    elif args.command == "connect":
+        url = manager.get_connection_url(user_id, args.name)
+        print(url)
+
+    elif args.command == "delete":
+        manager.delete_devbox(user_id, args.name)
+
+    elif args.command == "list":
+        boxes = manager.list_devboxes(user_id)
+        if not boxes:
+            print("No Dev Boxes found.")
+        else:
+            for box in boxes:
+                name = box.get("name", "<unknown>")
+                state = box.get("provisioningState", "?")
+                power = box.get("powerState", "?")
+                print(f"  {name}  provisioning={state}  power={power}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli_main())

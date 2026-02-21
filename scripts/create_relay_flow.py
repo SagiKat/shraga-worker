@@ -107,8 +107,8 @@ def build_flow_definition():
                                 "item/cr_useremail": "@triggerBody()?['text']",
                                 "item/cr_mcs_conversation_id": "@triggerBody()?['text_1']",
                                 "item/cr_message": "@triggerBody()?['text_2']",
-                                "item/cr_direction": 1,
-                                "item/cr_status": 1
+                                "item/cr_direction": "Inbound",
+                                "item/cr_status": "Unclaimed"
                             },
                             "host": {
                                 "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
@@ -221,7 +221,7 @@ def build_flow_definition():
                             "parameters": {
                                 "entityName": "cr_shraga_conversations",
                                 "recordId": "@variables('ResponseRowId')",
-                                "item/cr_status": 4
+                                "item/cr_status": "Delivered"
                             },
                             "host": {
                                 "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",

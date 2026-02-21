@@ -40,13 +40,13 @@ STATE_FILE = ".orchestrator_state.json"
 # Dev Box configuration
 DEVCENTER_ENDPOINT = os.environ.get("DEVCENTER_ENDPOINT")
 DEVBOX_PROJECT = os.environ.get("DEVBOX_PROJECT")
-DEVBOX_POOL = os.environ.get("DEVBOX_POOL", "shraga-worker-pool")
+DEVBOX_POOL = os.environ.get("DEVBOX_POOL", "botdesigner-pool-italynorth")
 
-# Task status codes (must match Dataverse)
-STATUS_PENDING = 1
-STATUS_RUNNING = 5
-STATUS_COMPLETED = 7
-STATUS_FAILED = 8
+# Task status codes (string values matching Dataverse picklist)
+STATUS_PENDING = "Pending"
+STATUS_RUNNING = "Running"
+STATUS_COMPLETED = "Completed"
+STATUS_FAILED = "Failed"
 
 # Provisioning threshold
 PROVISION_THRESHOLD = int(os.environ.get("PROVISION_THRESHOLD", "5"))
@@ -290,7 +290,7 @@ class Orchestrator:
         try:
             # Query for user tasks that need mirroring
             filter_query = (
-                f"cr_status eq {STATUS_PENDING} "
+                f"cr_status eq '{STATUS_PENDING}' "
                 f"and cr_ismirror eq false "
                 f"and cr_mirrortaskid eq null"
             )

@@ -36,10 +36,18 @@
                   "type": "string",
                   "x-ms-content-hint": "TEXT",
                   "x-ms-dynamically-added": true
+                },
+                "text_1": {
+                  "description": "Email of the user requesting cancellation",
+                  "title": "userEmail",
+                  "type": "string",
+                  "x-ms-content-hint": "TEXT",
+                  "x-ms-dynamically-added": true
                 }
               },
               "required": [
-                "text"
+                "text",
+                "text_1"
               ]
             }
           }
@@ -55,10 +63,10 @@
           "inputs": {
             "parameters": {
               "entityName": "cr_shraga_tasks",
-              "$filter": "cr_status eq 5",
+              "$filter": "cr_status eq 'Running' and crb3b_useremail eq '@{triggerBody()['text_1']}'",
               "$orderby": "createdon desc",
               "$top": 1,
-              "$select": "cr_shraga_taskid,cr_prompt,cr_status"
+              "$select": "cr_shraga_taskid,cr_prompt,cr_status,crb3b_useremail"
             },
             "host": {
               "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
@@ -77,7 +85,7 @@
                 "parameters": {
                   "entityName": "cr_shraga_tasks",
                   "recordId": "@first(outputs('List_Running_Tasks')?['body/value'])?['cr_shraga_taskid']",
-                  "item/cr_status": 9
+                  "item/cr_status": "Canceled"
                 },
                 "host": {
                   "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
@@ -162,10 +170,18 @@
           "type": "string",
           "x-ms-content-hint": "TEXT",
           "x-ms-dynamically-added": true
+        },
+        "text_1": {
+          "description": "Email of the user requesting cancellation",
+          "title": "userEmail",
+          "type": "string",
+          "x-ms-content-hint": "TEXT",
+          "x-ms-dynamically-added": true
         }
       },
       "required": [
-        "text"
+        "text",
+        "text_1"
       ]
     },
     "state": "Started",

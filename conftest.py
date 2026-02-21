@@ -110,7 +110,7 @@ SAMPLE_TASK = {
     "cr_shraga_taskid": SAMPLE_TASK_ID,
     "cr_name": "Test Task",
     "cr_prompt": "Create a hello world script",
-    "cr_status": 1,
+    "cr_status": "Pending",
     "cr_ismirror": False,
     "cr_mirrortaskid": None,
     "cr_transcript": "",

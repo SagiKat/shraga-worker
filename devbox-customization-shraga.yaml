@@ -16,18 +16,20 @@ tasks:
     timeout: 900
 
   # Install Python (for worker scripts)
-  - name: winget
+  # NOTE: winget fails for Python in system context (InstallerErrorCode: 3).
+  # Use choco instead, which works in system context.
+  # See DEVBOX_CUSTOMIZATION_FINDINGS_2026-02-16.md finding #2.
+  - name: choco
     parameters:
-      package: Python.Python.3.12
+      package: python312
     timeout: 600
 
-  # Install Python packages
-  - name: powershell
-    parameters:
-      command: |
-        python -m pip install --upgrade pip
-        pip install requests azure-identity watchdog
-    timeout: 300
+  # NOTE: pip packages CANNOT be installed via customization API.
+  # After choco installs Python, the PATH is not available in the system
+  # customization PowerShell context. Even refreshenv does not help.
+  # pip packages must be installed after first RDP login (via Playwright
+  # or a first-login startup script).
+  # See DEVBOX_CUSTOMIZATION_FINDINGS_2026-02-16.md findings #3 and #4.
 
   # Configure Git
   - name: powershell
@@ -127,7 +129,7 @@ User: $env:USERNAME
         $repoPath = "C:\Dev\shraga-worker"
         if (!(Test-Path $repoPath)) {
           Write-Host "Cloning repository..." -ForegroundColor Yellow
-          git clone https://msazure.visualstudio.com/DefaultCollection/CCI/_git/Users --branch users/sagik/shraga-worker $repoPath 2>&1
+          git clone https://github.com/SagiKat/shraga-worker.git $repoPath 2>&1
 
           if ($LASTEXITCODE -eq 0) {
             Write-Host "✅ Repository cloned to: $repoPath" -ForegroundColor Green
@@ -193,11 +195,36 @@ User: $env:USERNAME
         Write-Host ""
         Write-Host "=== Configuring Worker Auto-Start ===" -ForegroundColor Cyan
 
-        $workerPath = "C:\Dev\shraga-worker\worker.py"
+        $workerPath = "C:\Dev\shraga-worker\integrated_task_worker.py"
         $taskName = "ShragaWorker"
 
+        # Resolve Python executable dynamically -- choco does not install to
+        # C:\Python312.  Search well-known choco and standard install locations.
+        $pyExe = $null
+        $pyCandidates = @(
+          'C:\Python312\python.exe',
+          'C:\ProgramData\chocolatey\lib\python312\tools\python.exe',
+          'C:\ProgramData\chocolatey\bin\python3.exe',
+          'C:\ProgramData\chocolatey\bin\python.exe'
+        )
+        foreach ($c in $pyCandidates) {
+          if (Test-Path $c) { $pyExe = $c; break }
+        }
+        if (-not $pyExe) {
+          $pyExe = (Get-Command python -ErrorAction SilentlyContinue).Source
+        }
+        if (-not $pyExe) {
+          Write-Host "WARNING: Python not found. Using 'python' and hoping PATH resolves it." -ForegroundColor Yellow
+          $pyExe = 'python'
+        }
+        Write-Host "Using Python: $pyExe" -ForegroundColor Cyan
+
+        # Install pip packages now that we are in a user session with PATH
+        & $pyExe -m pip install --upgrade pip
+        & $pyExe -m pip install requests azure-identity azure-core watchdog
+
         # Create Task Scheduler task to run worker on startup
-        $action = New-ScheduledTaskAction -Execute "python.exe" -Argument "`"$workerPath`"" -WorkingDirectory "C:\Dev\shraga-worker"
+        $action = New-ScheduledTaskAction -Execute $pyExe -Argument "`"$workerPath`"" -WorkingDirectory "C:\Dev\shraga-worker"
         $trigger = New-ScheduledTaskTrigger -AtStartup
         $principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive -RunLevel Limited
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
@@ -205,14 +232,14 @@ User: $env:USERNAME
         # Register task
         try {
           Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-          Write-Host "✅ Worker configured to auto-start on boot" -ForegroundColor Green
+          Write-Host "Worker configured to auto-start on boot" -ForegroundColor Green
           Write-Host "   Task name: $taskName" -ForegroundColor Gray
         } catch {
-          Write-Host "⚠️  Failed to create scheduled task: $_" -ForegroundColor Red
+          Write-Host "Failed to create scheduled task: $_" -ForegroundColor Red
         }
 
         Write-Host ""
         Write-Host "=== Shraga Dev Box Ready ===" -ForegroundColor Cyan
         Write-Host "Please authenticate Claude Code and Azure CLI to complete setup." -ForegroundColor Yellow
         Write-Host ""
-    timeout: 60
+    timeout: 120

@@ -130,6 +130,12 @@
       "SchemaName": "crb3b_onedriveurl",
       "AttributeType": "String",
       "DisplayName": "OneDrive URL"
+    },
+    {
+      "LogicalName": "crb3b_sessionsummary",
+      "SchemaName": "crb3b_sessionsummary",
+      "AttributeType": "Memo",
+      "DisplayName": "Session Summary"
     }
   ]
 }

@@ -61,7 +61,7 @@
       "AttributeType": "String",
       "DisplayName": "Status",
       "description": "Processing status",
-      "values": ["Unclaimed", "Claimed", "Processed", "Delivered"]
+      "values": ["Unclaimed", "Claimed", "Processed", "Delivered", "Expired"]
     },
     {
       "LogicalName": "cr_useremail",

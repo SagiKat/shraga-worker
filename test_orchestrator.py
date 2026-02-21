@@ -329,10 +329,10 @@ class TestOrchestratorUpdateTask:
         mod, _ = _import_orchestrator(monkeypatch, tmp_path)
         mock_patch.return_value = MagicMock(raise_for_status=MagicMock())
         orch = mod.Orchestrator()
-        result = orch.update_task("task-1", status=5, assigned_worker_id="w-1")
+        result = orch.update_task("task-1", status="Running", assigned_worker_id="w-1")
         assert result is True
         sent_data = mock_patch.call_args[1]["json"]
-        assert sent_data["cr_status"] == 5
+        assert sent_data["cr_status"] == "Running"
         assert sent_data["cr_assignedworkerid"] == "w-1"
 
     @patch("orchestrator.requests.patch")
@@ -340,13 +340,13 @@ class TestOrchestratorUpdateTask:
         mod, _ = _import_orchestrator(monkeypatch, tmp_path)
         mock_patch.side_effect = Exception("Error")
         orch = mod.Orchestrator()
-        assert orch.update_task("task-1", status=5) is False
+        assert orch.update_task("task-1", status="Running") is False
 
     def test_returns_false_with_empty_id(self, monkeypatch, tmp_path):
         mod, _ = _import_orchestrator(monkeypatch, tmp_path)
         orch = mod.Orchestrator()
-        assert orch.update_task("", status=5) is False
-        assert orch.update_task(None, status=5) is False
+        assert orch.update_task("", status="Running") is False
+        assert orch.update_task(None, status="Running") is False
 
     @patch("orchestrator.requests.patch")
     def test_returns_false_with_no_fields(self, mock_patch, monkeypatch, tmp_path):
@@ -360,7 +360,7 @@ class TestOrchestratorUpdateTask:
         mod, _ = _import_orchestrator(monkeypatch, tmp_path)
         mock_patch.return_value = MagicMock(raise_for_status=MagicMock())
         orch = mod.Orchestrator()
-        orch.update_task("task-1", status=5, assigned_worker_id=None)
+        orch.update_task("task-1", status="Running", assigned_worker_id=None)
         sent_data = mock_patch.call_args[1]["json"]
         assert "cr_assignedworkerid" not in sent_data
 

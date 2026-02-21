@@ -27,7 +27,7 @@
               "subscriptionRequest/message": 1,
               "subscriptionRequest/entityname": "cr_shraga_task",
               "subscriptionRequest/scope": 4,
-              "subscriptionRequest/filterexpression": "cr_status eq 1"
+              "subscriptionRequest/filterexpression": "cr_status eq 'Pending'"
             },
             "host": {
               "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
@@ -51,7 +51,7 @@
             "parameters": {
               "entityName": "cr_shraga_tasks",
               "recordId": "@triggerOutputs()?['body/cr_shraga_taskid']",
-              "$select": "cr_shraga_taskid,cr_prompt,cr_status,crb3b_useremail,crb3b_runningmessageid,crb3b_onedriveurl"
+              "$select": "cr_shraga_taskid,cr_prompt,cr_status,crb3b_useremail,crb3b_runningmessageid,crb3b_onedriveurl,crb3b_shortdescription"
             },
             "host": {
               "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
@@ -168,54 +168,20 @@
                                 },
                                 {
                                   "type": "TextBlock",
-                                  "text": "{taskTitleShort}",
+                                  "text": "{shortDescription}",
                                   "size": "Default",
                                   "isSubtle": true,
                                   "spacing": "None",
                                   "wrap": true,
-                                  "id": "shortDesc",
-                                  "maxLines": 2
+                                  "maxLines": 3
                                 },
                                 {
                                   "type": "TextBlock",
-                                  "text": "{taskTitle}",
-                                  "size": "Default",
-                                  "isSubtle": true,
+                                  "text": "[See full original task description]({taskPromptUrl})",
+                                  "size": "Small",
+                                  "color": "Accent",
                                   "spacing": "None",
-                                  "wrap": true,
-                                  "id": "fullDesc",
-                                  "isVisible": false
-                                },
-                                {
-                                  "type": "ActionSet",
-                                  "spacing": "None",
-                                  "actions": [
-                                    {
-                                      "type": "Action.ToggleVisibility",
-                                      "title": "show more",
-                                      "id": "showMoreDesc",
-                                      "targetElements": [
-                                        { "elementId": "shortDesc", "isVisible": false },
-                                        { "elementId": "fullDesc", "isVisible": true },
-                                        { "elementId": "showMoreDesc", "isVisible": false },
-                                        { "elementId": "showLessDesc", "isVisible": true }
-                                      ],
-                                      "style": "positive"
-                                    },
-                                    {
-                                      "type": "Action.ToggleVisibility",
-                                      "title": "show less",
-                                      "id": "showLessDesc",
-                                      "isVisible": false,
-                                      "targetElements": [
-                                        { "elementId": "shortDesc", "isVisible": true },
-                                        { "elementId": "fullDesc", "isVisible": false },
-                                        { "elementId": "showMoreDesc", "isVisible": true },
-                                        { "elementId": "showLessDesc", "isVisible": false }
-                                      ],
-                                      "style": "positive"
-                                    }
-                                  ]
+                                  "wrap": true
                                 }
                               ],
                               "verticalContentAlignment": "Center"
@@ -303,7 +269,7 @@
                   ]
                 },
                 "type": "Compose",
-                "inputs": "@replace(replace(replace(string(outputs('Compose_CardTemplate')),'{taskTitleShort}',replace(replace(replace(replace(take(coalesce(outputs('Get_a_row_by_ID')?['body/cr_prompt'],'Task'),80), '\\', '\\\\'), '\"', '\\\"'), decodeUriComponent('%0A'), ' | '), decodeUriComponent('%0D'), '')),'{taskTitle}',replace(replace(replace(replace(take(coalesce(outputs('Get_a_row_by_ID')?['body/cr_prompt'],'Task'),500), '\\', '\\\\'), '\"', '\\\"'), decodeUriComponent('%0A'), ' | '), decodeUriComponent('%0D'), '')),'{startedAt}',concat(formatDateTime(utcNow(),'MMM dd, yyyy h:mm tt'),' UTC'))"
+                "inputs": "@replace(replace(replace(string(outputs('Compose_CardTemplate')),'{shortDescription}',replace(replace(replace(replace(take(coalesce(outputs('Get_a_row_by_ID')?['body/crb3b_shortdescription'],outputs('Get_a_row_by_ID')?['body/cr_prompt'],'Task'),200), '\\', '\\\\'), '\"', '\\\"'), decodeUriComponent('%0A'), ' '), decodeUriComponent('%0D'), '')),'{taskPromptUrl}',if(empty(outputs('Get_a_row_by_ID')?['body/crb3b_onedriveurl']),'',replace(coalesce(outputs('Get_a_row_by_ID')?['body/crb3b_onedriveurl'],''),'&view=0','/TASK_PROMPT.md'))),'{startedAt}',concat(formatDateTime(utcNow(),'MMM dd, yyyy h:mm tt'),' UTC'))"
               },
               "Compose_CardWithOneDrive": {
                 "runAfter": {
@@ -382,7 +348,7 @@
                 "not": {
                   "equals": [
                     "@outputs('Get_a_row_by_ID')?['body/cr_status']",
-                    1
+                    "Pending"
                   ]
                 }
               }

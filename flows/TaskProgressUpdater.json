@@ -56,26 +56,9 @@
             ]
           }
         },
-        "Init_OlderMsgs": {
-          "runAfter": {
-            "Init_RecentMsgs": [
-              "Succeeded"
-            ]
-          },
-          "type": "InitializeVariable",
-          "inputs": {
-            "variables": [
-              {
-                "name": "OlderMsgs",
-                "type": "string",
-                "value": ""
-              }
-            ]
-          }
-        },
         "Init_Counter": {
           "runAfter": {
-            "Init_OlderMsgs": [
+            "Init_RecentMsgs": [
               "Succeeded"
             ]
           },
@@ -99,7 +82,7 @@
                 "parameters": {
                   "entityName": "cr_shraga_tasks",
                   "recordId": "@triggerOutputs()?['body/crb3b_taskid']",
-                  "$select": "cr_prompt,cr_status,crb3b_runningchatid,crb3b_runningmessageid,crb3b_lastcardupdatetime,createdon"
+                  "$select": "cr_prompt,cr_status,crb3b_runningchatid,crb3b_runningmessageid,crb3b_lastcardupdatetime,crb3b_workingdir,crb3b_onedriveurl,crb3b_shortdescription,createdon"
                 },
                 "host": {
                   "apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
@@ -152,41 +135,17 @@
                           "type": "Compose",
                           "inputs": "@concat('[', formatDateTime(items('Apply_to_each_message')?['createdon'], 'HH:mm:ss'), '] ', replace(replace(replace(replace(substring(coalesce(items('Apply_to_each_message')?['cr_content'], '(no content)'), 0, min(length(coalesce(items('Apply_to_each_message')?['cr_content'], '(no content)')), 200)), '\\', '\\\\'), '\"', '\\\"'), decodeUriComponent('%0A'), '\\n'), decodeUriComponent('%0D'), ''))"
                         },
-                        "Check_Recent_Or_Older": {
-                          "actions": {
-                            "Append_To_Recent": {
-                              "runAfter": {},
-                              "type": "AppendToStringVariable",
-                              "inputs": {
-                                "name": "RecentMsgs",
-                                "value": "@{if(greater(variables('Counter'), 1), ',', '')}{\"type\":\"ColumnSet\",\"spacing\":\"Small\",\"columns\":[{\"type\":\"Column\",\"width\":\"90px\",\"items\":[{\"type\":\"TextBlock\",\"text\":\"@{take(outputs('Compose_Formatted_Msg'), add(indexOf(outputs('Compose_Formatted_Msg'), ']'), 1))}\",\"color\":\"Accent\",\"size\":\"Small\",\"spacing\":\"None\",\"fontType\":\"Monospace\"}]},{\"type\":\"Column\",\"width\":\"stretch\",\"items\":[{\"type\":\"TextBlock\",\"text\":\"@{substring(outputs('Compose_Formatted_Msg'), add(indexOf(outputs('Compose_Formatted_Msg'), ']'), 2))}\",\"size\":\"Small\",\"wrap\":true,\"spacing\":\"None\"}]}]}"
-                              }
-                            }
-                          },
+                        "Append_To_Recent": {
                           "runAfter": {
                             "Compose_Formatted_Msg": [
                               "Succeeded"
                             ]
                           },
-                          "else": {
-                            "actions": {
-                              "Append_To_Older": {
-                                "runAfter": {},
-                                "type": "AppendToStringVariable",
-                                "inputs": {
-                                  "name": "OlderMsgs",
-                                  "value": "@{if(greater(variables('Counter'), 6), ',', '')}{\"type\":\"ColumnSet\",\"spacing\":\"Small\",\"columns\":[{\"type\":\"Column\",\"width\":\"90px\",\"items\":[{\"type\":\"TextBlock\",\"text\":\"@{take(outputs('Compose_Formatted_Msg'), add(indexOf(outputs('Compose_Formatted_Msg'), ']'), 1))}\",\"color\":\"Accent\",\"size\":\"Small\",\"spacing\":\"None\",\"fontType\":\"Monospace\"}]},{\"type\":\"Column\",\"width\":\"stretch\",\"items\":[{\"type\":\"TextBlock\",\"text\":\"@{substring(outputs('Compose_Formatted_Msg'), add(indexOf(outputs('Compose_Formatted_Msg'), ']'), 2))}\",\"size\":\"Small\",\"wrap\":true,\"spacing\":\"None\"}]}]}"
-                                }
-                              }
-                            }
-                          },
-                          "expression": {
-                            "lessOrEquals": [
-                              "@variables('Counter')",
-                              5
-                            ]
-                          },
-                          "type": "If"
+                          "type": "AppendToStringVariable",
+                          "inputs": {
+                            "name": "RecentMsgs",
+                            "value": "@{if(greater(variables('Counter'), 1), ',', '')}{\"type\":\"ColumnSet\",\"spacing\":\"Small\",\"columns\":[{\"type\":\"Column\",\"width\":\"90px\",\"items\":[{\"type\":\"TextBlock\",\"text\":\"@{take(outputs('Compose_Formatted_Msg'), add(indexOf(outputs('Compose_Formatted_Msg'), ']'), 1))}\",\"color\":\"Accent\",\"size\":\"Small\",\"spacing\":\"None\",\"fontType\":\"Monospace\"}]},{\"type\":\"Column\",\"width\":\"stretch\",\"items\":[{\"type\":\"TextBlock\",\"text\":\"@{substring(outputs('Compose_Formatted_Msg'), add(indexOf(outputs('Compose_Formatted_Msg'), ']'), 2))}\",\"size\":\"Small\",\"wrap\":true,\"spacing\":\"None\"}]}]}"
+                          }
                         }
                       },
                       "runAfter": {
@@ -197,18 +156,9 @@
                       "type": "Foreach",
                       "operationOptions": "Sequential"
                     },
-                    "Compose_Has_Older": {
-                      "runAfter": {
-                        "Apply_to_each_message": [
-                          "Succeeded"
-                        ]
-                      },
-                      "type": "Compose",
-                      "inputs": "@if(greater(length(variables('OlderMsgs')), 0), 'true', 'false')"
-                    },
                     "Compose_TaskTitle": {
                       "runAfter": {
-                        "Compose_Has_Older": [
+                        "Apply_to_each_message": [
                           "Succeeded"
                         ]
                       },
@@ -224,27 +174,9 @@
                       "type": "Compose",
                       "inputs": "@formatDateTime(coalesce(outputs('Get_Task_Row')?['body/createdon'], utcNow()), 'MMM dd, yyyy hh:mm:ss tt')"
                     },
-                    "Compose_OlderSection": {
-                      "runAfter": {
-                        "Compose_SubmittedTime": [
-                          "Succeeded"
-                        ]
-                      },
-                      "type": "Compose",
-                      "inputs": "@if(equals(outputs('Compose_Has_Older'), 'true'), concat(',{\"type\":\"Container\",\"id\":\"olderMessages\",\"isVisible\":false,\"spacing\":\"None\",\"items\":[', variables('OlderMsgs'), ']}'), '')"
-                    },
-                    "Compose_ShowMoreSection": {
-                      "runAfter": {
-                        "Compose_OlderSection": [
-                          "Succeeded"
-                        ]
-                      },
-                      "type": "Compose",
-                      "inputs": "@if(equals(outputs('Compose_Has_Older'), 'true'), concat(',{\"type\":\"ActionSet\",\"id\":\"showMoreBtn\",\"actions\":[{\"type\":\"Action.ToggleVisibility\",\"title\":\"Show earlier messages\",\"targetElements\":[{\"elementId\":\"olderMessages\",\"isVisible\":true},{\"elementId\":\"showMoreBtn\",\"isVisible\":false},{\"elementId\":\"showLessBtn\",\"isVisible\":true}]}]},{\"type\":\"ActionSet\",\"id\":\"showLessBtn\",\"isVisible\":false,\"actions\":[{\"type\":\"Action.ToggleVisibility\",\"title\":\"Show less\",\"targetElements\":[{\"elementId\":\"olderMessages\",\"isVisible\":false},{\"elementId\":\"showMoreBtn\",\"isVisible\":true},{\"elementId\":\"showLessBtn\",\"isVisible\":false}]}]}'), '')"
-                    },
                     "Compose_MessageCount": {
                       "runAfter": {
-                        "Compose_ShowMoreSection": [
+                        "Compose_SubmittedTime": [
                           "Succeeded"
                         ]
                       },
@@ -258,7 +190,7 @@
                         ]
                       },
                       "type": "Compose",
-                      "inputs": "@concat('{\"$schema\":\"http://adaptivecards.io/schemas/adaptive-card.json\",\"type\":\"AdaptiveCard\",\"version\":\"1.5\",\"body\":[{\"type\":\"Container\",\"style\":\"emphasis\",\"bleed\":true,\"items\":[{\"type\":\"ColumnSet\",\"columns\":[{\"type\":\"Column\",\"width\":\"auto\",\"items\":[{\"type\":\"Image\",\"url\":\"https://cdn-icons-png.flaticon.com/512/4712/4712109.png\",\"size\":\"Medium\",\"style\":\"Person\",\"altText\":\"Shraga Agent\"}],\"verticalContentAlignment\":\"Center\"},{\"type\":\"Column\",\"width\":\"stretch\",\"items\":[{\"type\":\"TextBlock\",\"text\":\"Shraga Worker\",\"weight\":\"Bolder\",\"size\":\"Large\"},{\"type\":\"TextBlock\",\"text\":\"', take(outputs('Compose_TaskTitle'), 80), '\",\"size\":\"Default\",\"isSubtle\":true,\"spacing\":\"None\",\"wrap\":true,\"id\":\"shortDesc\",\"maxLines\":2},{\"type\":\"TextBlock\",\"text\":\"', outputs('Compose_TaskTitle'), '\",\"size\":\"Default\",\"isSubtle\":true,\"spacing\":\"None\",\"wrap\":true,\"id\":\"fullDesc\",\"isVisible\":false},{\"type\":\"ActionSet\",\"spacing\":\"None\",\"actions\":[{\"type\":\"Action.ToggleVisibility\",\"title\":\"show more\",\"id\":\"showMoreDesc\",\"targetElements\":[{\"elementId\":\"shortDesc\",\"isVisible\":false},{\"elementId\":\"fullDesc\",\"isVisible\":true},{\"elementId\":\"showMoreDesc\",\"isVisible\":false},{\"elementId\":\"showLessDesc\",\"isVisible\":true}]},{\"type\":\"Action.ToggleVisibility\",\"title\":\"show less\",\"id\":\"showLessDesc\",\"isVisible\":false,\"targetElements\":[{\"elementId\":\"shortDesc\",\"isVisible\":true},{\"elementId\":\"fullDesc\",\"isVisible\":false},{\"elementId\":\"showMoreDesc\",\"isVisible\":true},{\"elementId\":\"showLessDesc\",\"isVisible\":false}]}]}],\"verticalContentAlignment\":\"Center\"},{\"type\":\"Column\",\"width\":\"auto\",\"items\":[{\"type\":\"TextBlock\",\"text\":\"RUNNING\",\"color\":\"Good\",\"size\":\"Default\",\"weight\":\"Bolder\"}],\"verticalContentAlignment\":\"Center\"}]}]},{\"type\":\"Container\",\"spacing\":\"Medium\",\"items\":[{\"type\":\"TextBlock\",\"text\":\"Submitted: ', outputs('Compose_SubmittedTime'), '\",\"size\":\"Default\",\"isSubtle\":true},{\"type\":\"TextBlock\",\"text\":\"ACTIVITY LOG\",\"size\":\"Default\",\"isSubtle\":true,\"weight\":\"Bolder\",\"spacing\":\"Small\"}]},{\"type\":\"Container\",\"spacing\":\"Small\",\"style\":\"emphasis\",\"showBorder\":true,\"roundedCorners\":true,\"maxHeight\":\"300px\",\"items\":[', variables('RecentMsgs'), outputs('Compose_OlderSection'), ']}', outputs('Compose_ShowMoreSection'), ']}')"
+                      "inputs": "@concat('{\"$schema\":\"http://adaptivecards.io/schemas/adaptive-card.json\",\"type\":\"AdaptiveCard\",\"version\":\"1.5\",\"body\":[{\"type\":\"Container\",\"style\":\"emphasis\",\"bleed\":true,\"items\":[{\"type\":\"ColumnSet\",\"columns\":[{\"type\":\"Column\",\"width\":\"auto\",\"items\":[{\"type\":\"Image\",\"url\":\"https://cdn-icons-png.flaticon.com/512/4712/4712109.png\",\"size\":\"Medium\",\"style\":\"Person\",\"altText\":\"Shraga Agent\"}],\"verticalContentAlignment\":\"Center\"},{\"type\":\"Column\",\"width\":\"stretch\",\"items\":[{\"type\":\"TextBlock\",\"text\":\"Shraga Worker\",\"weight\":\"Bolder\",\"size\":\"Large\"},{\"type\":\"TextBlock\",\"text\":\"', replace(replace(replace(replace(take(coalesce(outputs('Get_Task_Row')?['body/crb3b_shortdescription'], outputs('Compose_TaskTitle'), 'Task'), 200), '\\', '\\\\'), '\"', '\\\"'), decodeUriComponent('%0A'), ' '), decodeUriComponent('%0D'), ''), '\",\"size\":\"Default\",\"isSubtle\":true,\"spacing\":\"None\",\"wrap\":true,\"maxLines\":3}', if(empty(outputs('Get_Task_Row')?['body/crb3b_onedriveurl']), '', concat(',{\"type\":\"TextBlock\",\"text\":\"[See full original task description](', replace(coalesce(outputs('Get_Task_Row')?['body/crb3b_onedriveurl'], ''), '&view=0', '/TASK_PROMPT.md'), ')\",\"size\":\"Small\",\"color\":\"Accent\",\"spacing\":\"None\",\"wrap\":true}')), '],\"verticalContentAlignment\":\"Center\"},{\"type\":\"Column\",\"width\":\"auto\",\"items\":[{\"type\":\"TextBlock\",\"text\":\"RUNNING\",\"color\":\"Good\",\"size\":\"Default\",\"weight\":\"Bolder\"}],\"verticalContentAlignment\":\"Center\"}]}]},{\"type\":\"Container\",\"spacing\":\"Medium\",\"items\":[{\"type\":\"TextBlock\",\"text\":\"Submitted: ', outputs('Compose_SubmittedTime'), '\",\"size\":\"Default\",\"isSubtle\":true},{\"type\":\"TextBlock\",\"text\":\"ACTIVITY LOG\",\"size\":\"Default\",\"isSubtle\":true,\"weight\":\"Bolder\",\"spacing\":\"Small\"}]},{\"type\":\"Container\",\"spacing\":\"Small\",\"style\":\"emphasis\",\"showBorder\":true,\"roundedCorners\":true,\"maxHeight\":\"500px\",\"items\":[', variables('RecentMsgs'), ']}', if(empty(outputs('Get_Task_Row')?['body/crb3b_onedriveurl']), '', concat(',{\"type\":\"TextBlock\",\"text\":\"[Open session folder in OneDrive](', outputs('Get_Task_Row')?['body/crb3b_onedriveurl'], ')\",\"size\":\"Small\",\"color\":\"Accent\",\"wrap\":true,\"spacing\":\"Medium\"}')), ']}')"
                     },
                     "Parse_Card_JSON": {
                       "runAfter": {
@@ -380,7 +312,7 @@
               "expression": {
                 "equals": [
                   "@outputs('Get_Task_Row')?['body/cr_status']",
-                  5
+                  "Running"
                 ]
               },
               "type": "If"
@@ -464,12 +396,6 @@
           "type": "InitializeVariable"
         },
         {
-          "type": "InitializeVariable"
-        },
-        {
-          "type": "If"
-        },
-        {
           "type": "OpenApiConnection",
           "swaggerOperationId": "GetItem"
         },
@@ -538,9 +464,6 @@
         {
           "type": "OpenApiConnection",
           "swaggerOperationId": "UpdateCardInConversation"
-        },
-        {
-          "type": "AppendToStringVariable"
         },
         {
           "type": "AppendToStringVariable"

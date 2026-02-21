@@ -20,8 +20,16 @@ from azure.identity import DefaultAzureCredential
 DATAVERSE_URL = "https://org3e79cdb1.crm3.dynamics.com"
 DATAVERSE_API = f"{DATAVERSE_URL}/api/data/v9.2"
 
-# ShragaRelay flow ID (already deployed and active)
-RELAY_FLOW_ID = "29f53538-6d0a-f111-8406-002248d570fd"
+# WARNING: This flow ID MUST match the flowId in bot/fallback_topic.yaml.
+# If you change the flow in Power Automate or Copilot Studio, update BOTH files
+# to keep them in sync. A mismatch will cause the bot topic to invoke a
+# nonexistent or wrong flow, silently breaking the relay pipeline.
+#
+# Current SendMessage flow ID (Power Automate):
+#   f6144661-8f48-9528-f120-b1666abccea0
+# Corresponding workflowEntityId (Dataverse / Copilot Studio):
+#   68c91f74-85d8-0fec-b574-8ae9f315453b
+RELAY_FLOW_ID = "f6144661-8f48-9528-f120-b1666abccea0"
 
 # Fallback topic component ID
 FALLBACK_COMPONENT_ID = "928c6921-eb36-450f-b2bc-9ad966b3f02e"

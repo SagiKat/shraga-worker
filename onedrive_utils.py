@@ -26,6 +26,39 @@ from typing import Optional
 
 
 # ---------------------------------------------------------------------------
+# 0. Helpers
+# ---------------------------------------------------------------------------
+
+def _path_looks_like_file(p: str | Path) -> bool:
+    """
+    Infer whether *p* refers to a file (as opposed to a folder) based on
+    whether the last path component has a file extension (suffix).
+
+    This avoids calling ``Path.is_file()`` which hits the filesystem and
+    returns ``False`` when the file has not synced yet (OneDrive race).
+
+    Examples
+    --------
+    >>> _path_looks_like_file("C:/OneDrive/Sessions/task1/result.md")
+    True
+    >>> _path_looks_like_file("C:/OneDrive/Sessions/task1")
+    False
+    >>> _path_looks_like_file("C:/OneDrive/Sessions/.gitignore")
+    False
+    >>> _path_looks_like_file("C:/OneDrive/Sessions/.config.json")
+    True
+    """
+    suffix = Path(p).suffix  # e.g. ".md", ".txt", "" for folders
+    # Pure dotfiles like ".gitignore" have suffix="" and stem=".gitignore"
+    # in Python's pathlib, so they look like folders. This is acceptable
+    # for OneDrive scenarios where we care about normal files (result.md,
+    # TASK.md, etc.) not dotfiles.
+    if not suffix:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # 1. Data classes
 # ---------------------------------------------------------------------------
 
@@ -360,8 +393,10 @@ def local_path_to_web_url(
             doc_path = parsed.path.rstrip("/")  # /personal/user/Documents
             full_path = f"{doc_path}/{relative}" if relative else doc_path
 
-            # Determine if it's a file or folder
-            is_file = Path(local_path).is_file()
+            # Determine if it's a file or folder using suffix-based
+            # inference so this works even when the local file hasn't
+            # synced yet (avoids the is_file() filesystem race).
+            is_file = _path_looks_like_file(local_path)
 
             encoded_path = urllib.parse.quote(full_path)
             result_url = f"{web_url}/_layouts/15/onedrive.aspx?id={encoded_path}"
@@ -393,8 +428,12 @@ def local_path_to_web_url(
         doc_path = f"{site_path}/Documents/{relative}" if relative else f"{site_path}/Documents"
 
         if view_in_browser:
+            is_file = _path_looks_like_file(local_path)
             encoded = urllib.parse.quote(doc_path)
-            return f"{parsed.scheme}://{parsed.netloc}{site_path}/_layouts/15/onedrive.aspx?id={encoded}"
+            result_url = f"{parsed.scheme}://{parsed.netloc}{site_path}/_layouts/15/onedrive.aspx?id={encoded}"
+            if not is_file:
+                result_url += "&view=0"
+            return result_url
         else:
             encoded_relative = urllib.parse.quote(relative)
             return f"{parsed.scheme}://{parsed.netloc}{site_path}/Documents/{encoded_relative}"
@@ -519,66 +558,151 @@ def get_graph_api_sharing_link_url(drive_item_id: str, drive_id: Optional[str] =
 
 
 # ---------------------------------------------------------------------------
-# 6. Convenience / demo
+# 6. CLI Interface
 # ---------------------------------------------------------------------------
 
+def create_session_folder(title: str, task_id: str) -> Path:
+    """
+    Create an isolated OneDrive session folder for a task.
+
+    Folder structure: {OneDrive root}/Shraga Sessions/{title}_{task_id_short}/
+
+    Parameters
+    ----------
+    title : str
+        Human-readable task title.  Sanitised for the filesystem.
+    task_id : str
+        Unique task identifier.  The first 8 characters are used as a short suffix.
+
+    Returns
+    -------
+    Path
+        Absolute path to the newly-created session folder.
+
+    Raises
+    ------
+    OneDriveRootNotFoundError
+        If no OneDrive sync root can be found.
+    """
+    # Sanitise title for filesystem safety
+    safe_name = "".join(c if c.isalnum() or c in ("-", "_", " ") else "_" for c in title)
+    safe_name = safe_name.strip()[:50]  # Limit length
+    task_id_short = task_id[:8] if task_id else "no_id"
+    folder_name = f"{safe_name}_{task_id_short}"
+
+    onedrive_root = find_onedrive_root()
+    sessions_root = Path(onedrive_root) / "Shraga Sessions"
+    sessions_root.mkdir(exist_ok=True)
+    session_folder = sessions_root / folder_name
+    session_folder.mkdir(exist_ok=True, parents=True)
+    return session_folder
+
+
+def _build_parser() -> "argparse.ArgumentParser":
+    """Construct the argparse parser with subcommands."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="onedrive_utils",
+        description="OneDrive utility CLI for discovering roots, creating session folders, and resolving web URLs.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # --- get-root --------------------------------------------------------
+    sp_root = subparsers.add_parser(
+        "get-root",
+        help="Discover and print the local OneDrive sync root folder.",
+    )
+    sp_root.add_argument(
+        "--include-personal",
+        action="store_true",
+        default=False,
+        help="Include personal (non-business) OneDrive accounts in the search.",
+    )
+
+    # --- create-session --------------------------------------------------
+    sp_session = subparsers.add_parser(
+        "create-session",
+        help="Create a session folder under the OneDrive root.",
+    )
+    sp_session.add_argument(
+        "--title",
+        required=True,
+        help="Human-readable task title (used as folder name prefix).",
+    )
+    sp_session.add_argument(
+        "--id",
+        required=True,
+        dest="task_id",
+        help="Unique task identifier (first 8 chars used as folder suffix).",
+    )
+
+    # --- get-url ---------------------------------------------------------
+    sp_url = subparsers.add_parser(
+        "get-url",
+        help="Convert a local synced file/folder path to its SharePoint/OneDrive web URL.",
+    )
+    sp_url.add_argument(
+        "--path",
+        required=True,
+        dest="local_path",
+        help="Absolute local path inside a OneDrive sync folder.",
+    )
+    sp_url.add_argument(
+        "--direct",
+        action="store_true",
+        default=False,
+        help="Return a direct document URL instead of a browser-view URL.",
+    )
+
+    return parser
+
+
+def _cli_main(argv: list[str] | None = None) -> int:
+    """
+    Entry-point for the CLI.
+
+    Parameters
+    ----------
+    argv : list[str] | None
+        Command-line arguments (defaults to ``sys.argv[1:]``).
+
+    Returns
+    -------
+    int
+        Exit code (0 = success, 1 = error).
+    """
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        if args.command == "get-root":
+            root = find_onedrive_root(business_only=not args.include_personal)
+            print(root)
+
+        elif args.command == "create-session":
+            folder = create_session_folder(title=args.title, task_id=args.task_id)
+            print(folder)
+
+        elif args.command == "get-url":
+            url = local_path_to_web_url(
+                args.local_path,
+                view_in_browser=not args.direct,
+            )
+            if url is None:
+                print(
+                    "ERROR: The given path is not inside any known OneDrive sync folder.",
+                    file=sys.stderr,
+                )
+                return 1
+            print(url)
+
+    except OneDriveRootNotFoundError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
 if __name__ == "__main__":
-    print("=" * 70)
-    print("OneDrive Discovery Report")
-    print("=" * 70)
-
-    # --- Environment variables ---
-    print("\n--- Environment Variables ---")
-    for var in ["ONEDRIVE_SESSIONS_DIR", "OneDriveCommercial", "OneDriveConsumer", "OneDrive"]:
-        val = os.environ.get(var, "(not set)")
-        print(f"  {var:30s} = {val}")
-
-    # --- Registry: Accounts ---
-    print("\n--- Registry: OneDrive Accounts ---")
-    for acct in get_onedrive_account_info():
-        print(f"  [{acct.account_name}]")
-        print(f"    UserFolder     = {acct.user_folder}")
-        print(f"    Business       = {acct.is_business}")
-        print(f"    Email          = {acct.user_email}")
-        print(f"    DisplayName    = {acct.display_name}")
-        print(f"    SPOResourceId  = {acct.spo_resource_id}")
-        print(f"    TenantId       = {acct.configured_tenant_id}")
-
-    # --- Registry: SyncEngines ---
-    print("\n--- Registry: SyncEngine Mappings ---")
-    for m in get_sync_engine_mappings():
-        print(f"  [{m.provider_key}]")
-        print(f"    MountPoint   = {m.mount_point}")
-        print(f"    UrlNamespace = {m.url_namespace}")
-        print(f"    LibraryType  = {m.library_type}")
-        print(f"    WebUrl       = {m.web_url}")
-
-    # --- find_onedrive_root ---
-    print("\n--- find_onedrive_root() ---")
-    try:
-        root = find_onedrive_root()
-        print(f"  Result: {root}")
-    except OneDriveRootNotFoundError as e:
-        print(f"  Error: {e}")
-
-    # --- URL mapping demo ---
-    print("\n--- URL Mapping Demo ---")
-    try:
-        root = find_onedrive_root()
-        # Pick a subfolder to demo
-        demo_path = os.path.join(root, "Sessions")
-        if os.path.isdir(demo_path):
-            url = local_path_to_web_url(demo_path)
-            print(f"  Local:  {demo_path}")
-            print(f"  Web:    {url}")
-
-            # Reverse
-            if url:
-                back = web_url_to_local_path(url)
-                print(f"  Back:   {back}")
-    except OneDriveRootNotFoundError:
-        print("  (skipped - no OneDrive root found)")
-
-    print("\n--- Graph API URL Examples ---")
-    print(f"  File by path:   {get_graph_api_file_url('Sessions/task1/result.md')}")
-    print(f"  Sharing link:   {get_graph_api_sharing_link_url('ITEM_ID_HERE')}")
+    raise SystemExit(_cli_main())

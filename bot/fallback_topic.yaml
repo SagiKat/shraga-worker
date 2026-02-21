@@ -22,7 +22,9 @@ beginDialog:
           responsetext: Topic.Response
           isfollowupexpecterd: Topic.IsFollowupExpected
 
-      flowId: 68c91f74-85d8-0fec-b574-8ae9f315453b
+      # WARNING: This flow ID MUST match RELAY_FLOW_ID in scripts/configure_bot_topic.py.
+      # SendMessage flow: f6144661-8f48-9528-f120-b1666abccea0
+      flowId: f6144661-8f48-9528-f120-b1666abccea0
 
     - kind: SendActivity
       id: sendActivity_response

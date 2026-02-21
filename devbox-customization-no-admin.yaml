@@ -117,7 +117,7 @@ userTasks:
         $repoPath = "C:\Dev\shraga-worker"
         if (!(Test-Path $repoPath)) {
           New-Item -ItemType Directory -Force -Path "C:\Dev" | Out-Null
-          git clone https://msazure.visualstudio.com/DefaultCollection/CCI/_git/Users --branch users/sagik/shraga-worker $repoPath
+          git clone https://github.com/SagiKat/shraga-worker.git $repoPath
           Write-Host "✓ Repository cloned to $repoPath" -ForegroundColor Green
         } else {
           Write-Host "! Repository already exists at $repoPath" -ForegroundColor Yellow

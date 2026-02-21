@@ -73,7 +73,7 @@ class TestE2EOrchestratorPipeline:
             "cr_shraga_taskid": "user-task-001",
             "cr_name": "Build REST API",
             "cr_prompt": "Create a REST API for user authentication",
-            "cr_status": 1,
+            "cr_status": "Pending",
             "cr_ismirror": False,
             "cr_mirrortaskid": None,
             "_ownerid_value": "user-aaa-bbb",
@@ -160,11 +160,11 @@ class TestE2EWorkerLifecycle:
         mock_patch.return_value = MagicMock(raise_for_status=MagicMock())
 
         worker = worker_mod.IntegratedTaskWorker()
-        result = worker.update_task("task-001", status=5, status_message="Running")
+        result = worker.update_task("task-001", status="Running", status_message="Running")
         assert result is True
 
         sent_data = mock_patch.call_args[1]["json"]
-        assert sent_data["cr_status"] == 5
+        assert sent_data["cr_status"] == "Running"
 
     @patch("integrated_task_worker.requests.post")
     def test_worker_sends_webhook_message(self, mock_post, monkeypatch, tmp_path):
@@ -525,7 +525,7 @@ class TestE2EFullFlow:
             "cr_shraga_taskid": "user-flow-001",
             "cr_name": "Full Flow Test",
             "cr_prompt": "Create a calculator app",
-            "cr_status": 1,
+            "cr_status": "Pending",
             "cr_ismirror": False,
             "cr_mirrortaskid": None,
             "_ownerid_value": "user-flow-aaa",
@@ -605,3 +605,365 @@ class TestE2EFullFlow:
 
             # Verify worker updated task status
             assert worker_patch.called
+
+
+# ===========================================================================
+# E2E: Cancellation flow
+# ===========================================================================
+
+class TestE2ECancelRunningTask:
+    """Tests for the cooperative cancellation flow.
+
+    The cancellation flow works as follows:
+    1. A task is submitted and claimed (status -> Running)
+    2. Inside execute_with_autonomous_agent, is_task_canceled() is checked
+       at the top of each Worker/Verifier iteration and after the worker
+       phase completes (before verification).
+    3. When is_task_canceled returns True, the method writes a session
+       summary with terminal_status="canceled", sends a webhook message,
+       and returns (False, "Task canceled by user", transcript, stats).
+    4. process_task then marks the task as Failed and sends a failure
+       notification.
+    5. The worker object remains functional and can process additional tasks.
+    """
+
+    @patch("integrated_task_worker.requests.get")
+    @patch("integrated_task_worker.requests.post")
+    @patch("integrated_task_worker.requests.patch")
+    @patch("integrated_task_worker.subprocess.Popen")
+    def test_e2e_cancel_running_task(self, mock_popen, mock_patch, mock_post,
+                                      mock_get, monkeypatch, tmp_path):
+        """
+        Full E2E cancellation flow:
+        1. Submit task and let it be claimed (Running)
+        2. Simulate cancel by having is_task_canceled return True
+        3. Verify task ends with Canceled message
+        4. Verify worker object is still functional afterward
+        """
+        _, worker_mod, _ = _import_modules(monkeypatch, tmp_path)
+
+        # --- Mock Popen for parse_prompt_with_llm ---
+        parsed = {
+            "task_description": "Build a feature",
+            "success_criteria": "Feature works correctly"
+        }
+        mock_popen.return_value = MagicMock(
+            communicate=MagicMock(return_value=(
+                json.dumps({"result": json.dumps(parsed)}), ""
+            )),
+            returncode=0
+        )
+
+        # --- Mock PATCH (claim_task + status updates) ---
+        mock_patch.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock()
+        )
+
+        # --- Mock POST (webhook messages) ---
+        mock_post.return_value = MagicMock(raise_for_status=MagicMock())
+
+        # --- Mock GET ---
+        # is_devbox_busy returns "not busy" (empty value list)
+        # is_task_canceled will be patched separately on the instance
+        # promote_queued_tasks returns empty list
+        mock_get.return_value = MagicMock(
+            raise_for_status=MagicMock(),
+            json=lambda: {"value": []}
+        )
+
+        worker = worker_mod.IntegratedTaskWorker()
+
+        # Patch is_task_canceled to return True on first call (simulating
+        # the user canceling the task while it's running). This is the
+        # first checkpoint inside execute_with_autonomous_agent, at the
+        # top of the while loop before the worker phase runs.
+        with patch.object(worker, "is_task_canceled", return_value=True) as mock_canceled:
+            # Also patch create_session_folder to use tmp_path
+            session_folder = tmp_path / "cancel_session"
+            session_folder.mkdir()
+            with patch.object(worker, "create_session_folder", return_value=session_folder):
+                # Patch write_session_summary and write_session_log to avoid
+                # complex filesystem interactions; we verify they are called.
+                with patch.object(worker, "write_session_summary", return_value={}) as mock_write_summary, \
+                     patch.object(worker, "write_session_log") as mock_write_log, \
+                     patch.object(worker, "write_result_and_transcript_files") as mock_write_files:
+
+                    task = {
+                        "cr_shraga_taskid": "task-cancel-001",
+                        "cr_name": "Task To Cancel",
+                        "cr_prompt": "Do something that will be canceled",
+                        "cr_transcript": "",
+                        "@odata.etag": 'W/"cancel-etag-001"',
+                    }
+
+                    result = worker.process_task(task)
+
+                    # --- Assertions ---
+
+                    # 1. process_task returns False (task did not succeed)
+                    assert result is False
+
+                    # 2. is_task_canceled was called (cancellation was checked)
+                    assert mock_canceled.called
+
+                    # 3. Session summary was written with "canceled" terminal status
+                    assert mock_write_summary.called
+                    summary_kwargs = mock_write_summary.call_args
+                    assert summary_kwargs[1]["terminal_status"] == "canceled"
+
+                    # 4. Result/transcript files were written
+                    assert mock_write_files.called
+
+                    # 5. Webhook messages were sent (at least one for cancel notification)
+                    assert mock_post.called
+                    webhook_calls = mock_post.call_args_list
+                    # Find the cancellation-related webhook message
+                    webhook_bodies = [
+                        c[1]["json"]["cr_content"]
+                        for c in webhook_calls
+                        if "json" in c[1] and "cr_content" in c[1].get("json", {})
+                    ]
+                    cancel_messages = [
+                        body for body in webhook_bodies
+                        if "cancel" in body.lower() or "Cancel" in body
+                    ]
+                    assert len(cancel_messages) >= 1, (
+                        f"Expected at least one cancel webhook message, "
+                        f"got messages: {webhook_bodies}"
+                    )
+
+                    # 6. Task status was updated (PATCH was called for claim + status updates)
+                    assert mock_patch.called
+                    patch_calls = mock_patch.call_args_list
+                    # Look for the final status update with STATUS_FAILED
+                    patch_bodies = [
+                        c[1]["json"]
+                        for c in patch_calls
+                        if "json" in c[1]
+                    ]
+                    failed_updates = [
+                        body for body in patch_bodies
+                        if body.get("cr_status") == "Failed"
+                    ]
+                    assert len(failed_updates) >= 1, (
+                        f"Expected at least one PATCH setting status to 'Failed', "
+                        f"got bodies: {patch_bodies}"
+                    )
+
+                    # 7. The result message includes cancel info
+                    error_results = [
+                        body.get("cr_result", "")
+                        for body in patch_bodies
+                        if "cr_result" in body
+                    ]
+                    cancel_results = [
+                        r for r in error_results
+                        if "cancel" in r.lower() or "Cancel" in r
+                    ]
+                    assert len(cancel_results) >= 1, (
+                        f"Expected cr_result to mention cancellation, "
+                        f"got: {error_results}"
+                    )
+
+        # 8. Worker is still functional after cancellation -- it can process
+        #    another task. Verify the worker object is in a clean state.
+        assert worker.current_task_id is None, (
+            "current_task_id should be cleared after task processing"
+        )
+
+        # Verify the worker can still make API calls (e.g., update_task)
+        mock_patch.reset_mock()
+        mock_patch.return_value = MagicMock(raise_for_status=MagicMock())
+        update_ok = worker.update_task("another-task-id", status="Running", status_message="Test")
+        assert update_ok is True
+
+    @patch("integrated_task_worker.requests.get")
+    @patch("integrated_task_worker.requests.post")
+    @patch("integrated_task_worker.requests.patch")
+    @patch("integrated_task_worker.subprocess.Popen")
+    def test_e2e_cancel_after_worker_phase_before_verification(
+        self, mock_popen, mock_patch, mock_post, mock_get,
+        monkeypatch, tmp_path
+    ):
+        """
+        Cancel detected after worker phase completes but before verification.
+
+        This tests the second cancellation checkpoint: the worker phase returns
+        STATUS: done, and then is_task_canceled is checked before the verifier
+        runs. If canceled, the task should terminate without running verification.
+        """
+        _, worker_mod, _ = _import_modules(monkeypatch, tmp_path)
+
+        # --- Mock Popen for parse_prompt_with_llm ---
+        parsed = {
+            "task_description": "Build another feature",
+            "success_criteria": "Tests pass"
+        }
+        mock_popen.return_value = MagicMock(
+            communicate=MagicMock(return_value=(
+                json.dumps({"result": json.dumps(parsed)}), ""
+            )),
+            returncode=0
+        )
+
+        mock_patch.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock()
+        )
+        mock_post.return_value = MagicMock(raise_for_status=MagicMock())
+        mock_get.return_value = MagicMock(
+            raise_for_status=MagicMock(),
+            json=lambda: {"value": []}
+        )
+
+        # --- Mock AgentCLI instance ---
+        mock_agent_instance = MagicMock()
+        session_folder = tmp_path / "cancel_session_2"
+        session_folder.mkdir()
+        mock_agent_instance.setup_project.return_value = session_folder
+        mock_agent_instance.worker_loop.return_value = (
+            "done",
+            "Worker output: feature built",
+            {"cost_usd": 0.01, "duration_ms": 5000, "num_turns": 3, "session_id": "sess-1"}
+        )
+        # verify_work should NOT be called because cancel happens first
+        mock_agent_instance.verify_work.return_value = (
+            True, "Approved", {"cost_usd": 0.0, "duration_ms": 0, "num_turns": 0}
+        )
+
+        worker = worker_mod.IntegratedTaskWorker()
+
+        # is_task_canceled: False on first call (before worker phase),
+        # True on second call (after worker phase, before verification).
+        cancel_call_count = {"n": 0}
+
+        def is_canceled_side_effect(task_id):
+            cancel_call_count["n"] += 1
+            # First call: not canceled (allows worker phase to run)
+            # Second call: canceled (stops before verification)
+            return cancel_call_count["n"] >= 2
+
+        # Patch AgentCLI on the actual worker_mod (not via decorator, since
+        # _import_modules re-imports the module after decorators apply)
+        with patch.object(worker_mod, "AgentCLI", return_value=mock_agent_instance), \
+             patch.object(worker_mod, "local_path_to_web_url", return_value=""), \
+             patch.object(worker, "is_task_canceled", side_effect=is_canceled_side_effect) as mock_canceled, \
+             patch.object(worker, "create_session_folder", return_value=session_folder), \
+             patch.object(worker, "write_session_summary", return_value={}) as mock_write_summary, \
+             patch.object(worker, "write_session_log"), \
+             patch.object(worker, "write_result_and_transcript_files"):
+
+            task = {
+                "cr_shraga_taskid": "task-cancel-002",
+                "cr_name": "Cancel Before Verify",
+                "cr_prompt": "Do something, then cancel before verify",
+                "cr_transcript": "",
+                "@odata.etag": 'W/"cancel-etag-002"',
+            }
+
+            result = worker.process_task(task)
+
+            # Task failed due to cancellation
+            assert result is False
+
+            # is_task_canceled was called at least twice
+            assert mock_canceled.call_count >= 2
+
+            # Verifier was NOT called (cancel caught before verification)
+            assert not mock_agent_instance.verify_work.called, (
+                "verify_work should not be called when task is canceled "
+                "before verification"
+            )
+
+            # Session summary recorded as "canceled"
+            assert mock_write_summary.called
+            summary_kwargs = mock_write_summary.call_args
+            assert summary_kwargs[1]["terminal_status"] == "canceled"
+
+            # Worker phase DID run (worker_loop was called)
+            assert mock_agent_instance.worker_loop.called
+
+    @patch("integrated_task_worker.requests.get")
+    @patch("integrated_task_worker.requests.post")
+    @patch("integrated_task_worker.requests.patch")
+    @patch("integrated_task_worker.subprocess.Popen")
+    def test_e2e_cancel_not_triggered_when_task_runs_normally(
+        self, mock_popen, mock_patch, mock_post, mock_get, monkeypatch, tmp_path
+    ):
+        """
+        Verify that when is_task_canceled returns False throughout, the task
+        completes normally without being interrupted by cancellation logic.
+        This is a negative test to ensure the cancellation checkpoints do not
+        interfere with normal execution.
+        """
+        _, worker_mod, _ = _import_modules(monkeypatch, tmp_path)
+
+        parsed = {
+            "task_description": "Normal task",
+            "success_criteria": "It works"
+        }
+        mock_popen.return_value = MagicMock(
+            communicate=MagicMock(return_value=(
+                json.dumps({"result": json.dumps(parsed)}), ""
+            )),
+            returncode=0
+        )
+        mock_patch.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock()
+        )
+        mock_post.return_value = MagicMock(raise_for_status=MagicMock())
+        mock_get.return_value = MagicMock(
+            raise_for_status=MagicMock(),
+            json=lambda: {"value": []}
+        )
+
+        worker = worker_mod.IntegratedTaskWorker()
+
+        session_folder = tmp_path / "normal_session"
+        session_folder.mkdir()
+
+        with patch.object(worker, "is_task_canceled", return_value=False), \
+             patch.object(worker, "create_session_folder", return_value=session_folder), \
+             patch.object(worker, "write_session_summary", return_value={}) as mock_write_summary, \
+             patch.object(worker, "write_session_log"), \
+             patch.object(worker, "write_result_and_transcript_files"):
+
+            # Mock execute_with_autonomous_agent for simplicity (normal success)
+            with patch.object(worker, "execute_with_autonomous_agent") as mock_exec:
+                mock_exec.return_value = (True, "Task done!", "transcript", {})
+
+                with patch("integrated_task_worker.subprocess.run") as mock_run:
+                    mock_run.side_effect = [
+                        MagicMock(returncode=0),  # git add
+                        MagicMock(returncode=0, stdout="", stderr=""),  # git commit
+                        MagicMock(returncode=0, stdout="abc123\n", stderr=""),  # git rev-parse
+                    ]
+
+                    task = {
+                        "cr_shraga_taskid": "task-normal-001",
+                        "cr_name": "Normal Task",
+                        "cr_prompt": "Do something normally",
+                        "cr_transcript": "",
+                        "@odata.etag": 'W/"normal-etag-001"',
+                    }
+
+                    result = worker.process_task(task)
+
+                    # Task completed successfully
+                    assert result is True
+
+                    # Verify the final status is Completed (7), not Failed
+                    patch_bodies = [
+                        c[1]["json"]
+                        for c in mock_patch.call_args_list
+                        if "json" in c[1]
+                    ]
+                    completed_updates = [
+                        body for body in patch_bodies
+                        if body.get("cr_status") == "Completed"
+                    ]
+                    assert len(completed_updates) >= 1, (
+                        f"Expected STATUS_COMPLETED ('Completed') update, got: {patch_bodies}"
+                    )

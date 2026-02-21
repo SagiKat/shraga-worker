@@ -33,14 +33,14 @@ UPDATE_BRANCH = os.environ.get("UPDATE_BRANCH", "origin/users/sagik/shraga-worke
 
 MACHINE_NAME = platform.node()  # This dev box's hostname
 
-# Status codes
-STATUS_PENDING = 1
-STATUS_QUEUED = 3
-STATUS_RUNNING = 5
-STATUS_WAITING_FOR_INPUT = 6
-STATUS_COMPLETED = 7
-STATUS_FAILED = 8
-STATUS_CANCELED = 9
+# Status codes (string values matching Dataverse picklist)
+STATUS_PENDING = "Pending"
+STATUS_QUEUED = "Queued"
+STATUS_RUNNING = "Running"
+STATUS_WAITING_FOR_INPUT = "WaitingForInput"
+STATUS_COMPLETED = "Completed"
+STATUS_FAILED = "Failed"
+STATUS_CANCELED = "Canceled"
 
 def format_session_numbers(stats: dict) -> str:
     """Format accumulated session stats into a one-line summary string.
@@ -366,7 +366,7 @@ class IntegratedTaskWorker:
         # Filter for pending tasks assigned to this dev box or unassigned
         # Support GUID, email in cr_userid, or email in crb3b_useremail
         filter_parts = [
-            f"cr_status eq {STATUS_PENDING}",
+            f"cr_status eq '{STATUS_PENDING}'",
             f"(cr_userid eq '{self.current_user_id}' or cr_userid eq '{WEBHOOK_USER}' or crb3b_useremail eq '{WEBHOOK_USER}')",
             f"(crb3b_devbox eq '{MACHINE_NAME}' or crb3b_devbox eq null)"
         ]
@@ -401,7 +401,7 @@ class IntegratedTaskWorker:
 
         url = f"{DATAVERSE_URL}/api/data/v9.2/{TABLE}"
         params = {
-            "$filter": f"crb3b_devbox eq '{MACHINE_NAME}' and cr_status eq {STATUS_RUNNING}",
+            "$filter": f"crb3b_devbox eq '{MACHINE_NAME}' and cr_status eq '{STATUS_RUNNING}'",
             "$top": 1,
             "$select": "cr_shraga_taskid"
         }
@@ -464,7 +464,7 @@ class IntegratedTaskWorker:
             return False
 
     def is_task_canceled(self, task_id: str) -> bool:
-        """Check if a task has been canceled (status=9) in Dataverse.
+        """Check if a task has been canceled in Dataverse.
 
         Called periodically during task execution to support cancellation.
         """
@@ -529,7 +529,7 @@ class IntegratedTaskWorker:
 
         url = f"{DATAVERSE_URL}/api/data/v9.2/{TABLE}"
         params = {
-            "$filter": f"crb3b_devbox eq '{MACHINE_NAME}' and cr_status eq {STATUS_QUEUED}",
+            "$filter": f"crb3b_devbox eq '{MACHINE_NAME}' and cr_status eq '{STATUS_QUEUED}'",
             "$orderby": "createdon asc",
             "$top": 1,
             "$select": "cr_shraga_taskid"
@@ -555,10 +555,11 @@ class IntegratedTaskWorker:
         except Exception as e:
             print(f"[WARN] promote_queued_tasks failed: {e}")
 
-    def update_task(self, task_id: str, status: int = None,
+    def update_task(self, task_id: str, status: str = None,
                     status_message: str = None, result: str = None,
                     transcript: str = None, workingdir: str = None,
-                    onedriveurl: str = None, session_summary: str = None):
+                    onedriveurl: str = None, session_summary: str = None,
+                    short_description: str = None):
         """Update task in Dataverse"""
         headers = self._get_headers(content_type="application/json")
         if not headers:
@@ -581,6 +582,8 @@ class IntegratedTaskWorker:
             data["crb3b_onedriveurl"] = onedriveurl
         if session_summary is not None:
             data["crb3b_sessionsummary"] = session_summary
+        if short_description is not None:
+            data["crb3b_shortdescription"] = short_description
 
         try:
             response = requests.patch(url, headers=headers, json=data, timeout=REQUEST_TIMEOUT)
@@ -590,19 +593,24 @@ class IntegratedTaskWorker:
             print(f"[ERROR] Task update timed out")
             return False
         except Exception as e:
-            # If the crb3b_sessionsummary column doesn't exist yet, retry without it
-            if session_summary is not None and "crb3b_sessionsummary" in data:
-                error_str = str(e).lower()
-                if "property" in error_str or "column" in error_str or "attribute" in error_str or "crb3b_sessionsummary" in error_str:
-                    print(f"[WARN] crb3b_sessionsummary column may not exist yet, retrying without it")
-                    del data["crb3b_sessionsummary"]
-                    try:
-                        response = requests.patch(url, headers=headers, json=data, timeout=REQUEST_TIMEOUT)
-                        response.raise_for_status()
-                        return True
-                    except Exception as retry_e:
-                        print(f"[ERROR] Retry without session_summary also failed: {retry_e}")
-                        return False
+            # If optional DV columns don't exist yet, retry without them
+            error_str = str(e).lower()
+            optional_columns = ["crb3b_sessionsummary", "crb3b_shortdescription"]
+            removed_any = False
+            if "property" in error_str or "column" in error_str or "attribute" in error_str:
+                for col in optional_columns:
+                    if col in data:
+                        print(f"[WARN] {col} column may not exist yet, removing from update")
+                        del data[col]
+                        removed_any = True
+            if removed_any and data:
+                try:
+                    response = requests.patch(url, headers=headers, json=data, timeout=REQUEST_TIMEOUT)
+                    response.raise_for_status()
+                    return True
+                except Exception as retry_e:
+                    print(f"[ERROR] Retry without optional columns also failed: {retry_e}")
+                    return False
             print(f"[ERROR] Updating task: {e}")
             return False
 
@@ -706,6 +714,85 @@ JSON output:"""
                 'task_description': raw_prompt,
                 'success_criteria': 'Review and confirm task is complete'
             }
+
+    def generate_short_description(self, raw_prompt: str) -> str:
+        """Generate a 1-2 sentence summary of the task prompt using Claude CLI.
+
+        This short description is displayed on Adaptive Cards in Teams instead of
+        the full (potentially long) task prompt. It gives the user a quick overview
+        of what the task is about.
+
+        Args:
+            raw_prompt: The full raw task prompt text from Dataverse.
+
+        Returns:
+            A 1-2 sentence summary string. Falls back to the first 120 chars of
+            the raw prompt if LLM generation fails.
+        """
+        print("[SHORT DESC] Generating short task description...")
+
+        summarize_prompt = (
+            "Summarize the following task prompt in exactly 1-2 concise sentences "
+            "(max 150 characters total). Focus on the core action requested. "
+            "Return ONLY the summary text, no quotes, no explanation.\n\n"
+            f"Task prompt:\n{raw_prompt[:2000]}"
+        )
+
+        try:
+            cmd = [
+                "claude",
+                "-p",
+                "--output-format", "json",
+                "--dangerously-skip-permissions",
+            ]
+
+            env = {k: v for k, v in os.environ.items() if k != 'CLAUDECODE'}
+
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                env=env
+            )
+
+            stdout, stderr = process.communicate(input=summarize_prompt, timeout=30)
+
+            if process.returncode != 0:
+                raise Exception(f"Claude Code failed: {stderr}")
+
+            response = json.loads(stdout)
+            result_text = response.get('result', '').strip()
+
+            # Clean up: remove wrapping quotes if present
+            if result_text.startswith('"') and result_text.endswith('"'):
+                result_text = result_text[1:-1]
+
+            # Enforce max length
+            if len(result_text) > 200:
+                result_text = result_text[:197] + "..."
+
+            if not result_text:
+                raise Exception("Empty result from Claude")
+
+            print(f"[SHORT DESC] Generated: {result_text}")
+            return result_text
+
+        except subprocess.TimeoutExpired:
+            print("[SHORT DESC] Timeout - falling back to truncated prompt")
+            fallback = raw_prompt.replace('\n', ' ').strip()[:120]
+            if len(raw_prompt) > 120:
+                fallback += "..."
+            return fallback
+        except Exception as e:
+            print(f"[SHORT DESC] Error: {e} - falling back to truncated prompt")
+            fallback = raw_prompt.replace('\n', ' ').strip()[:120]
+            if len(raw_prompt) > 120:
+                fallback += "..."
+            return fallback
 
     def append_to_transcript(self, current_transcript: str, from_who: str, message: str):
         """Append message to JSONL transcript"""
@@ -897,6 +984,106 @@ JSON output:"""
 
         return summary
 
+    def write_task_prompt_file(self, session_folder: Path, raw_prompt: str,
+                               success_criteria: str = ""):
+        """Write the full raw task prompt and success criteria to the session folder.
+
+        Creates TASK_PROMPT.md containing the original unprocessed prompt text
+        exactly as received from Dataverse, and SUCCESS_CRITERIA.md with the
+        extracted success criteria.  These files provide a complete audit trail
+        of what the agent was asked to do.
+
+        Args:
+            session_folder: Path to the OneDrive session folder.
+            raw_prompt: The original cr_prompt text from Dataverse (unprocessed).
+            success_criteria: Extracted success criteria string.
+        """
+        # --- TASK_PROMPT.md ---
+        try:
+            prompt_file = session_folder / "TASK_PROMPT.md"
+            content = f"# Full Task Prompt\n\n{raw_prompt or ''}"
+            prompt_file.write_text(content, encoding="utf-8")
+            print(f"[FILES] Wrote TASK_PROMPT.md ({len(content)} chars) to {prompt_file}")
+        except Exception as e:
+            print(f"[ERROR] Could not write TASK_PROMPT.md: {e}")
+
+        # --- SUCCESS_CRITERIA.md ---
+        try:
+            criteria_file = session_folder / "SUCCESS_CRITERIA.md"
+            criteria_content = f"# Success Criteria\n\n{success_criteria or ''}"
+            criteria_file.write_text(criteria_content, encoding="utf-8")
+            print(f"[FILES] Wrote SUCCESS_CRITERIA.md ({len(criteria_content)} chars) to {criteria_file}")
+        except Exception as e:
+            print(f"[ERROR] Could not write SUCCESS_CRITERIA.md: {e}")
+
+    def capture_git_history(self, session_folder: Path, work_dir: Path = None):
+        """Capture git commit history and write GIT_HISTORY.md to the session folder.
+
+        Runs ``git log`` in the specified work directory (or repo_path) and writes
+        the output to the session folder so the commit trail is preserved alongside
+        other session artifacts.
+
+        Args:
+            session_folder: Path to the OneDrive session folder.
+            work_dir: Directory containing the git repository.  Defaults to self.repo_path.
+        """
+        if work_dir is None:
+            work_dir = self.repo_path
+
+        try:
+            result = subprocess.run(
+                ["git", "log", "--oneline", "--no-decorate", "-50"],
+                cwd=str(work_dir),
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+            if result.returncode != 0:
+                print(f"[WARN] git log failed (rc={result.returncode}): {result.stderr}")
+                git_log_text = f"(git log failed: {result.stderr.strip()})"
+            else:
+                git_log_text = result.stdout.strip() or "(no commits)"
+
+            history_file = session_folder / "GIT_HISTORY.md"
+            content = f"# Git Commit History\n\n```\n{git_log_text}\n```\n"
+            history_file.write_text(content, encoding="utf-8")
+            print(f"[FILES] Wrote GIT_HISTORY.md ({len(content)} chars) to {history_file}")
+        except subprocess.TimeoutExpired:
+            print("[WARN] git log timed out")
+        except Exception as e:
+            print(f"[ERROR] Could not capture git history: {e}")
+
+    def write_result_and_transcript_files(self, session_folder: Path,
+                                           result_text: str = "",
+                                           transcript: str = ""):
+        """Write result.md and transcript.md to the session folder.
+
+        Called on every terminal state (completed, failed, canceled) so that
+        the OneDrive session folder always contains a human-readable copy of
+        the result and the full JSONL transcript.
+
+        Args:
+            session_folder: Path to the OneDrive session folder.
+            result_text: The cr_result content (final result or error message).
+            transcript: The cr_transcript content (JSONL transcript string).
+        """
+        # --- result.md ---
+        try:
+            result_file = session_folder / "result.md"
+            result_file.write_text(result_text or "", encoding="utf-8")
+            print(f"[FILES] Wrote result.md ({len(result_text or '')} chars) to {result_file}")
+        except Exception as e:
+            print(f"[ERROR] Could not write result.md: {e}")
+
+        # --- transcript.md ---
+        try:
+            transcript_file = session_folder / "transcript.md"
+            transcript_file.write_text(transcript or "", encoding="utf-8")
+            print(f"[FILES] Wrote transcript.md ({len(transcript or '')} chars) to {transcript_file}")
+        except Exception as e:
+            print(f"[ERROR] Could not write transcript.md: {e}")
+
     def write_session_log(self, summary: dict, session_folder: Path,
                           result_text: str = "", folder_url: str = ""):
         """Write a human-readable SESSION_LOG.md to the session folder.
@@ -1074,6 +1261,9 @@ JSON output:"""
         task_name = task_description[:50] if task_description else "unnamed_task"
         session_folder = self.create_session_folder(task_name, task_id)
 
+        # Write full task prompt and success criteria to session folder (T048)
+        self.write_task_prompt_file(session_folder, task_prompt, success_criteria)
+
         # Create autonomous agent instance
         agent = AgentCLI()
 
@@ -1141,7 +1331,7 @@ JSON output:"""
                 last_session_id = phase_stats["session_id"]
 
         def _finalize_summary(terminal_status: str, result_text: str):
-            """Write the session summary and session log for any terminal state."""
+            """Write the session summary, session log, result.md and transcript.md for any terminal state."""
             try:
                 summary = self.write_session_summary(
                     task_id=task_id,
@@ -1160,6 +1350,22 @@ JSON output:"""
                 )
             except Exception as e:
                 print(f"[ERROR] Failed to write session summary: {e}")
+
+            # Write result.md and transcript.md to session folder
+            try:
+                self.write_result_and_transcript_files(
+                    session_folder=session_folder,
+                    result_text=result_text,
+                    transcript=transcript,
+                )
+            except Exception as e:
+                print(f"[ERROR] Failed to write result/transcript files: {e}")
+
+            # Capture git commit history (T048)
+            try:
+                self.capture_git_history(session_folder)
+            except Exception as e:
+                print(f"[ERROR] Failed to capture git history: {e}")
 
         try:
             # Worker/Verifier loop
@@ -1366,6 +1572,10 @@ JSON output:"""
         if len(parsed_prompt.get('task_description', '')) > 300:
             task_description += "..."
 
+        # Generate a 1-2 sentence short description for Adaptive Card display
+        short_desc = self.generate_short_description(prompt)
+        self.update_task(task_id, short_description=short_desc)
+
         # Send task start notification with details
         start_msg = f"""Starting task: {task_name}
 
@@ -1384,10 +1594,8 @@ Worker/Verifier loop initiated..."""
             parsed_prompt_data=parsed_prompt  # Reuse parsed data
         )
 
-        # Append session numbers to the result text
-        session_numbers = format_session_numbers(session_stats)
-        if session_numbers:
-            result = result + session_numbers
+        # Session numbers are stored in session_summary.json (via write_session_summary),
+        # not appended to cr_result, to keep completed cards shorter and cleaner.
 
         # Update final status
         if success:
@@ -1483,51 +1691,73 @@ Full transcript saved in Dataverse (Task ID: {task_id})"""
 
         try:
             while True:
-                # Poll for pending tasks
-                tasks = self.poll_pending_tasks()
-
-                if tasks:
-                    print(f"[FOUND] {len(tasks)} pending task(s)")
-
-                    for task in tasks:
+                try:
+                    # Poll for pending tasks
+                    try:
+                        tasks = self.poll_pending_tasks()
+                    except Exception as e:
+                        print(f"[ERROR] Error polling for tasks: {e}")
                         try:
-                            self.process_task(task)
-                        except Exception as e:
-                            print(f"[ERROR] Unhandled exception processing task: {e}")
-                            self._cleanup_in_progress_task(f"Unhandled error: {e}")
-                            try:
-                                self.send_to_webhook(f"Task failed with unhandled error: {e}")
-                            except Exception:
-                                pass
-                            # Promote any queued tasks even after failure
-                            try:
-                                self.promote_queued_tasks()
-                            except Exception:
-                                pass
-                else:
-                    # IDLE - Check for updates (every 10 minutes)
-                    now = datetime.now(tz=timezone.utc)
-                    if self.last_update_check is None or (now - self.last_update_check) >= self.update_check_interval:
-                        print("[IDLE] Checking for updates...")
-                        self.last_update_check = now
+                            self.send_to_webhook(f"Error polling for tasks: {e}")
+                        except Exception:
+                            pass
+                        time.sleep(60)
+                        continue
 
-                        if self.check_for_updates():
-                            # New version available, apply update
-                            self.send_to_webhook("Updating worker to new version...")
-                            self.apply_update()
-                            # apply_update() exits, so this line never runs
+                    if tasks:
+                        print(f"[FOUND] {len(tasks)} pending task(s)")
 
-                # Poll every 10 seconds (autonomous agent takes longer)
-                time.sleep(10)
+                        for task in tasks:
+                            try:
+                                self.process_task(task)
+                            except Exception as e:
+                                print(f"[ERROR] Unhandled exception processing task: {e}")
+                                self._cleanup_in_progress_task(f"Unhandled error: {e}")
+                                try:
+                                    self.send_to_webhook(f"Task failed with unhandled error: {e}")
+                                except Exception:
+                                    pass
+                                # Promote any queued tasks even after failure
+                                try:
+                                    self.promote_queued_tasks()
+                                except Exception:
+                                    pass
+                    else:
+                        # IDLE - Check for updates (every 10 minutes)
+                        now = datetime.now(tz=timezone.utc)
+                        if self.last_update_check is None or (now - self.last_update_check) >= self.update_check_interval:
+                            print("[IDLE] Checking for updates...")
+                            self.last_update_check = now
+
+                            if self.check_for_updates():
+                                # New version available, apply update
+                                self.send_to_webhook("Updating worker to new version...")
+                                self.apply_update()
+                                # apply_update() exits, so this line never runs
+
+                    # Promote queued tasks after each iteration
+                    try:
+                        self.promote_queued_tasks()
+                    except Exception as e:
+                        print(f"[ERROR] Error promoting queued tasks: {e}")
+
+                    # Poll every 10 seconds (autonomous agent takes longer)
+                    time.sleep(10)
+
+                except Exception as e:
+                    print(f"\n[ERROR] Unexpected error in worker loop: {e}")
+                    self._cleanup_in_progress_task(f"Worker loop error: {e}")
+                    try:
+                        self.send_to_webhook(f"Worker error (recovering): {e}")
+                    except Exception:
+                        pass
+                    time.sleep(60)
+                    continue
 
         except KeyboardInterrupt:
             print("\n\n[INTERRUPT] Stopping worker...")
             self._cleanup_in_progress_task("Worker interrupted by user")
             self.send_to_webhook("Task worker stopped")
-        except Exception as e:
-            print(f"\n[FATAL ERROR] {e}")
-            self._cleanup_in_progress_task(f"Worker fatal error: {e}")
-            self.send_to_webhook(f"Worker error: {e}")
 
         print("[SHUTDOWN] Worker stopped")
 

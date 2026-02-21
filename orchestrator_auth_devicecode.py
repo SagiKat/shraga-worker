@@ -1,6 +1,19 @@
 """
-Device Code Flow authentication for Shraga Orchestrator
-Allows orchestrator to authenticate without a browser
+DEPRECATED -- Device Code Flow authentication for Shraga Orchestrator.
+
+This module is DEPRECATED and should NOT be used in production.
+
+Azure Conditional Access policies in the Shraga tenant block the OAuth 2.0
+Device Code grant flow.  Any attempt to authenticate via device code will be
+rejected by Azure AD with an ``AADSTS50199`` (or similar) Conditional Access
+error.
+
+The recommended authentication path is:
+  - For interactive/developer use:  ``az login`` + ``DefaultAzureCredential``
+  - For automated/CI use:           Managed Identity or Service Principal
+
+This file is retained for historical reference only.  It will be removed in a
+future cleanup pass.
 """
 
 from azure.identity import DeviceCodeCredential

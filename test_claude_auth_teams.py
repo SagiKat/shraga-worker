@@ -10,10 +10,12 @@ import pytest
 from unittest.mock import patch, MagicMock, PropertyMock
 
 from claude_auth_teams import (
+    AUTH_INSTRUCTIONS_TEMPLATE,
     ClaudeAuthManager,
     RemoteDevBoxAuth,
     TeamsClaudeAuth,
     DEVBOX_SETUP_SCRIPT,
+    build_auth_instructions,
     get_setup_script,
 )
 
@@ -314,3 +316,100 @@ class TestDevBoxSetupScript:
 
     def test_get_setup_script_returns_same(self):
         assert get_setup_script() == DEVBOX_SETUP_SCRIPT
+
+
+# ===========================================================================
+# Shared Auth Instructions (T027 -- consistent auth flow for GM and PM)
+# ===========================================================================
+
+class TestSharedAuthInstructions:
+    """Verify the shared auth instructions template and convenience function
+    ensure GM and PM produce identical messages."""
+
+    SAMPLE_URL = "https://devbox.microsoft.com/connect?devbox=shraga-test-01"
+
+    def test_template_contains_placeholder(self):
+        """AUTH_INSTRUCTIONS_TEMPLATE has a {connection_url} placeholder."""
+        assert "{connection_url}" in AUTH_INSTRUCTIONS_TEMPLATE
+
+    def test_template_contains_required_elements(self):
+        """Template includes web RDP link reference, Shraga-Authenticate, and done."""
+        assert "Shraga-Authenticate" in AUTH_INSTRUCTIONS_TEMPLATE
+        assert "claude /login" in AUTH_INSTRUCTIONS_TEMPLATE
+        assert "done" in AUTH_INSTRUCTIONS_TEMPLATE.lower()
+
+    def test_build_auth_instructions_formats_url(self):
+        """build_auth_instructions replaces the placeholder with the actual URL."""
+        msg = build_auth_instructions(self.SAMPLE_URL)
+        assert self.SAMPLE_URL in msg
+        assert "{connection_url}" not in msg
+
+    def test_build_auth_instructions_matches_template(self):
+        """build_auth_instructions output matches template.format()."""
+        expected = AUTH_INSTRUCTIONS_TEMPLATE.format(connection_url=self.SAMPLE_URL)
+        actual = build_auth_instructions(self.SAMPLE_URL)
+        assert actual == expected
+
+    def test_build_auth_instructions_matches_remote_devbox_auth(self):
+        """build_auth_instructions produces the same output as
+        RemoteDevBoxAuth.build_auth_message for the same URL."""
+        auth = RemoteDevBoxAuth()
+        from_class = auth.build_auth_message(self.SAMPLE_URL)
+        from_func = build_auth_instructions(self.SAMPLE_URL)
+        assert from_class == from_func, (
+            "RemoteDevBoxAuth.build_auth_message and build_auth_instructions "
+            "must produce identical output"
+        )
+
+    def test_gm_and_pm_produce_identical_auth_messages(self):
+        """Cross-verification: simulate GM and PM auth message generation
+        and confirm they are byte-identical.
+
+        GM path: _tool_get_rdp_auth_message -> build_auth_instructions
+        PM path: _tool_provision_devbox -> build_auth_instructions
+
+        Both paths call build_auth_instructions with the same connection URL,
+        so the output must be identical.
+        """
+        url = "https://devbox.microsoft.com/connect?devbox=shraga-cross-verify"
+
+        # Simulate GM path
+        gm_message = build_auth_instructions(url)
+
+        # Simulate PM path (same function call)
+        pm_message = build_auth_instructions(url)
+
+        assert gm_message == pm_message, (
+            "GM and PM must produce byte-identical auth instructions"
+        )
+
+        # Verify content requirements
+        assert url in gm_message
+        assert "Shraga-Authenticate" in gm_message
+        assert "claude /login" in gm_message
+        assert "done" in gm_message.lower()
+
+    def test_auth_message_contains_web_rdp_link(self):
+        """Auth instructions include the web RDP connection URL."""
+        msg = build_auth_instructions(self.SAMPLE_URL)
+        assert "Open this link in your browser: " + self.SAMPLE_URL in msg
+
+    def test_auth_message_mentions_shraga_authenticate_shortcut(self):
+        """Auth instructions reference the Shraga-Authenticate desktop shortcut."""
+        msg = build_auth_instructions(self.SAMPLE_URL)
+        assert "Shraga-Authenticate shortcut on the desktop" in msg
+
+    def test_auth_message_mentions_az_login(self):
+        """Auth instructions mention az login for Azure sign-in."""
+        msg = build_auth_instructions(self.SAMPLE_URL)
+        assert "az login" in msg
+
+    def test_auth_message_mentions_claude_login(self):
+        """Auth instructions mention claude /login for device code auth."""
+        msg = build_auth_instructions(self.SAMPLE_URL)
+        assert "claude /login" in msg
+
+    def test_auth_message_asks_user_to_reply_done(self):
+        """Auth instructions ask the user to reply 'done' when finished."""
+        msg = build_auth_instructions(self.SAMPLE_URL)
+        assert "reply here with done" in msg

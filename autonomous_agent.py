@@ -15,9 +15,10 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 try:
-    from onedrive_utils import local_path_to_web_url
+    from onedrive_utils import local_path_to_web_url, _path_looks_like_file
 except ImportError:
     local_path_to_web_url = None
+    _path_looks_like_file = None
 
 # Fix Windows console encoding for Unicode characters
 if sys.platform == 'win32':
@@ -733,11 +734,15 @@ After writing VERDICT.json, summarize your findings in plain text for the user t
         print("SUMMARY CREATION")
         print(f"{'='*60}\n")
 
-        # Build OneDrive URL mapping for files in the project folder
+        # Build OneDrive URL mapping for files in the project folder.
+        # Use suffix-based inference (_path_looks_like_file) instead of
+        # Path.is_file() so that files still pending OneDrive sync are
+        # included (fixes GAP-I11 sync race).
         file_links = {}
         if local_path_to_web_url and self.project_folder:
+            _is_file = _path_looks_like_file or (lambda p: Path(p).suffix != "")
             for f in self.project_folder.iterdir():
-                if f.is_file():
+                if _is_file(f):
                     url = local_path_to_web_url(str(f))
                     if url:
                         file_links[f.name] = url
@@ -750,7 +755,7 @@ After writing VERDICT.json, summarize your findings in plain text for the user t
         else:
             file_links_text = "(No OneDrive links available — use plain file names)"
 
-        summarizer_prompt = f"""You are a results summarizer. Create a concise summary of the work completed.
+        summarizer_prompt = f"""You are a results summarizer. Create a very brief summary of the work completed.
 
 WORK DIRECTORY: {self.project_folder}
 
@@ -761,33 +766,20 @@ Read all deliverable files (TASK.md, DELIVERABLES.md, VERDICT.json, and any outp
 Create a file called SUMMARY.md with a summary that follows these rules:
 
 FORMATTING RULES (MANDATORY):
-- Use markdown bullet points for ALL content. Do NOT write prose paragraphs.
-- Every section must use bullet lists, not freeform text.
-- Keep it concise — max 300-500 words total.
+- Output ONLY 2-3 bullet points, ~100 words total. No more.
+- Each bullet should be one concise sentence.
 - When referencing files, use clickable markdown links: [filename](url)
 - Use the FILE LINKS provided above for any file references.
+- Do NOT include section headers, horizontal rules, or any other formatting beyond the bullets.
 
 STRUCTURE:
 
 ```markdown
 # Task Summary: [Task Name]
 
-## What Was Done
-- [Action taken 1]
-- [Action taken 2]
-- [Action taken 3]
-
-## Key Results
-- [Result with specific data/numbers]
-- [Result with specific data/numbers]
-- [Changed file or artifact] — [view file](onedrive-url)
-
-## Verification
-- [What was tested and how]
-- [Test results: pass/fail counts]
-
-## Notes
-- [Any caveats or follow-up items]
+- [What was done and key result, with specific data/numbers if applicable]
+- [Verification outcome: what was tested, pass/fail counts]
+- [Notable artifacts or caveats, if any] — [view file](onedrive-url)
 ```
 
 Write SUMMARY.md with your summary, then output a brief confirmation message.

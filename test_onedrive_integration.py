@@ -359,7 +359,7 @@ class TestUpdateTaskWithWorkingDir:
         worker = mod.IntegratedTaskWorker()
         result = worker.update_task(
             "task-123",
-            status=5,
+            status="Running",
             workingdir=r"C:\Users\test\OneDrive - Contoso\Shraga Sessions\task_folder",
         )
 
@@ -375,7 +375,7 @@ class TestUpdateTaskWithWorkingDir:
         mock_patch.return_value = MagicMock(raise_for_status=MagicMock())
 
         worker = mod.IntegratedTaskWorker()
-        result = worker.update_task("task-123", status=7)
+        result = worker.update_task("task-123", status="Completed")
 
         assert result is True
         sent_data = mock_patch.call_args[1]["json"]

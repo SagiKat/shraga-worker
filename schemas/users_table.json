@@ -1,0 +1,69 @@
+{
+  "@odata.context": "https://org3e79cdb1.crm3.dynamics.com/api/data/v9.2/$metadata#EntityDefinitions('crb3b_shragauser')/Attributes(LogicalName,AttributeType,DisplayName,SchemaName)",
+  "entity": "crb3b_shragauser",
+  "collection": "crb3b_shragausers",
+  "display_name": "Shraga Users",
+  "description": "Tracks per-user onboarding progress, dev box assignment, and manager status.",
+  "custom_attributes": [
+    {
+      "LogicalName": "crb3b_useremail",
+      "SchemaName": "crb3b_useremail",
+      "AttributeType": "String",
+      "DisplayName": "User Email"
+    },
+    {
+      "LogicalName": "crb3b_azureadid",
+      "SchemaName": "crb3b_azureadid",
+      "AttributeType": "String",
+      "DisplayName": "Azure AD ID"
+    },
+    {
+      "LogicalName": "crb3b_devboxname",
+      "SchemaName": "crb3b_devboxname",
+      "AttributeType": "String",
+      "DisplayName": "DevBox Name"
+    },
+    {
+      "LogicalName": "crb3b_devboxstatus",
+      "SchemaName": "crb3b_devboxstatus",
+      "AttributeType": "String",
+      "DisplayName": "DevBox Status"
+    },
+    {
+      "LogicalName": "crb3b_claudeauthstatus",
+      "SchemaName": "crb3b_claudeauthstatus",
+      "AttributeType": "String",
+      "DisplayName": "Claude Auth Status"
+    },
+    {
+      "LogicalName": "crb3b_managerstatus",
+      "SchemaName": "crb3b_managerstatus",
+      "AttributeType": "String",
+      "DisplayName": "Manager Status"
+    },
+    {
+      "LogicalName": "crb3b_onboardingstep",
+      "SchemaName": "crb3b_onboardingstep",
+      "AttributeType": "String",
+      "DisplayName": "Onboarding Step"
+    },
+    {
+      "LogicalName": "crb3b_lastseen",
+      "SchemaName": "crb3b_lastseen",
+      "AttributeType": "DateTime",
+      "DisplayName": "Last Seen"
+    },
+    {
+      "LogicalName": "crb3b_connectionurl",
+      "SchemaName": "crb3b_connectionurl",
+      "AttributeType": "String",
+      "DisplayName": "Connection URL"
+    },
+    {
+      "LogicalName": "crb3b_authurl",
+      "SchemaName": "crb3b_authurl",
+      "AttributeType": "String",
+      "DisplayName": "Auth URL"
+    }
+  ]
+}

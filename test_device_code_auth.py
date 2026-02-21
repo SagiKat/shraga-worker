@@ -1,12 +1,20 @@
 """
-Simulate a dedicated GM session with NO az login.
-Uses DeviceCodeCredential to authenticate, then proves it can access DV.
+DEPRECATED -- Device code auth integration test.
+
+This test script exercised the device-code OAuth flow which is now blocked by
+Azure Conditional Access policies.  See orchestrator_auth_devicecode.py for
+details.  All functions below are skipped; the file is retained for reference.
 """
 import os
 import sys
 import json
+import pytest
 import requests
 from azure.identity import DeviceCodeCredential
+
+pytestmark = pytest.mark.skip(
+    reason="Device code auth is blocked by Conditional Access; dead code removed (GAP-M10)"
+)
 
 TENANT_ID = "72f988bf-86f1-41af-91ab-2d7cd011db47"
 DATAVERSE_URL = "https://org3e79cdb1.crm3.dynamics.com"

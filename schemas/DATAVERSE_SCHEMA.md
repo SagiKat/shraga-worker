@@ -77,7 +77,7 @@ Tables must be created in this order due to conceptual dependencies (no formal D
 | # | Logical Name | Schema Name | Display Name | Data Type | Max Length | Required | Description |
 |---|---|---|---|---|---|---|---|
 | 1 | `cr_shraga_conversationid` | `cr_shraga_conversationid` | Shraga Conversation | Uniqueidentifier (GUID) | -- | Auto | Primary key, auto-generated |
-| 2 | `cr_name` | `cr_name` | Name | Single Line of Text (String) | 200 | Required (Business Required) | Display name / first line of message, auto-truncated to 200 chars |
+| 2 | `cr_name` | `cr_name` | Name | Single Line of Text (String) | 100 | Required (Business Required) | Display name / first line of message, auto-truncated to 100 chars |
 | 3 | `cr_useremail` | `cr_useremail` | User Email | Single Line of Text (String) | 200 | Optional | User email address (from System.User.Email in bot) |
 | 4 | `cr_mcs_conversation_id` | `cr_mcs_conversation_id` | MCS Conversation ID | Single Line of Text (String) | 500 | Optional | Bot conversation ID (from System.Conversation.Id). Used to route responses back and for isFollowup filter |
 | 5 | `cr_message` | `cr_message` | Message | Multiple Lines of Text (Memo) | 100000 | Optional | Full message text (multiline) |
@@ -104,6 +104,7 @@ Tables must be created in this order due to conceptual dependencies (no formal D
 | `Claimed` | A manager has claimed this message (via ETag atomic concurrency) |
 | `Processed` | The inbound message has been fully processed |
 | `Delivered` | The outbound response has been read by the SendMessage flow |
+| `Expired` | The outbound response was never delivered and has been marked stale by cleanup |
 
 ### Relationships
 
@@ -115,7 +116,7 @@ None (no formal Dataverse lookup relationships). References to other tables are 
 - **Claiming:** Manager PATCHes `status=Claimed` + `claimed_by={manager_id}` using If-Match ETag header (HTTP 412 = lost race)
 - **Response:** Manager POSTs new outbound row with `direction=Outbound`, `status=Unclaimed`, `in_reply_to={inbound_row_id}`
 - **Delivery:** SendMessage flow reads outbound row, PATCHes `status=Delivered`
-- **Cleanup:** Stale unclaimed outbound rows are periodically marked as `Delivered` to prevent filter contamination
+- **Cleanup:** Stale unclaimed outbound rows are periodically marked as `Expired` to prevent filter contamination
 
 ---
 
@@ -138,7 +139,7 @@ None (no formal Dataverse lookup relationships). References to other tables are 
 | # | Logical Name | Schema Name | Display Name | Data Type | Max Length | Required | Description |
 |---|---|---|---|---|---|---|---|
 | 1 | `cr_shraga_taskid` | `cr_shraga_taskid` | Shraga Task | Uniqueidentifier (GUID) | -- | Auto | Primary key, auto-generated |
-| 2 | `cr_name` | `cr_name` | Task ID | Single Line of Text (String) | 200 | Required (Business Required) | Task title / display name. Populated with first 200 chars of prompt |
+| 2 | `cr_name` | `cr_name` | Task ID | Single Line of Text (String) | 100 | Required (Business Required) | Task title / display name. Populated with first 100 chars of prompt |
 | 3 | `cr_prompt` | `cr_prompt` | Prompt | Multiple Lines of Text (Memo) | 100000 | Optional | Full task description from user |
 | 4 | `cr_status` | `cr_status` | Status | **Picklist (Whole Number)** | -- | Optional | Task lifecycle status. See Picklist values below |
 | 5 | `cr_statusmessage` | `cr_statusmessage` | Status Message | Single Line of Text (String) | 200 | Optional | Human-readable status detail (e.g., "Claimed by CPC-sagik-AAG29") |
@@ -189,7 +190,7 @@ None (no formal Dataverse lookup relationships). Task ownership is tracked by `c
 - **Queuing:** If devbox busy, worker PATCHes `cr_status=3` (Queued) instead
 - **Promotion:** When devbox frees up, oldest queued task is PATCHed back to `cr_status=1` (Pending)
 - **Completion:** Worker PATCHes `cr_status=7` (Completed) + `cr_result` + `crb3b_sessionsummary`
-- **Flow triggers:** TaskRunner triggers on `cr_status=5`, TaskCompleted on `cr_status=7`, TaskFailed on `cr_status=8`, TaskCanceled on `cr_status=9`
+- **Flow triggers:** TaskRunner triggers on row creation with `cr_status=1` (Pending), TaskCompleted on `cr_status=7`, TaskFailed on `cr_status=8`, TaskCanceled on `cr_status=9`
 
 ---
 
@@ -263,6 +264,16 @@ None (no formal Dataverse lookup relationships). The `crb3b_taskid` column store
 | 11 | `crb3b_authurl` | `crb3b_authurl` | Auth URL | Single Line of Text (String) | 1000 | Optional | Claude Code device authentication URL (sent to user for sign-in) |
 | -- | `createdon` | `createdon` | Created On | DateTime | -- | Auto | Auto-set by Dataverse |
 | -- | `modifiedon` | `modifiedon` | Modified On | DateTime | -- | Auto | Auto-set by Dataverse |
+
+> **WARNING -- `crb3b_connectionurl` and `crb3b_authurl` may not exist:**
+> These two columns (`crb3b_connectionurl`, `crb3b_authurl`) may not be present in
+> all Dataverse environments. Some deployments omit them entirely, causing API
+> responses to exclude these fields from the returned JSON. Code that reads user
+> records MUST use safe access patterns (e.g., `.get("crb3b_connectionurl")` with a
+> `None` default) and MUST NOT crash when these columns are absent. Additionally,
+> these columns MUST NOT be included in PATCH or POST payloads -- writing to a
+> non-existent column will cause a Dataverse API error. The connection URL should
+> instead be obtained at runtime from the DevCenter API via `check_devbox_status`.
 
 ### String Values for crb3b_onboardingstep
 
@@ -398,7 +409,7 @@ Working in **Shraga Core** solution (cr prefix):
 1. Click **New** > **Table** > **Table**
 2. Display name: `Shraga Conversation`
 3. Plural display name: `Shraga Conversations`
-4. Primary column name: `Name` (this becomes `cr_name`, max length 200)
+4. Primary column name: `Name` (this becomes `cr_name`, max length 100)
 5. Click **Save**
 6. Open the table and add custom columns one at a time:
 
@@ -420,7 +431,7 @@ Working in **Shraga Core** solution (cr prefix):
 1. Click **New** > **Table** > **Table**
 2. Display name: `Shraga Task`
 3. Plural display name: `Shraga Tasks`
-4. Primary column name: `Task ID` (this becomes `cr_name`, max length 200)
+4. Primary column name: `Task ID` (this becomes `cr_name`, max length 100)
 5. Click **Save**
 6. Add custom columns:
 

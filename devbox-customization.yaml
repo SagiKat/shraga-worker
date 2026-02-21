@@ -28,9 +28,11 @@ tasks:
     timeout: 900
 
   # Install Python (for orchestrator/worker scripts)
-  - name: winget
+  # NOTE: winget fails for Python in system context (InstallerErrorCode: 3).
+  # Use choco instead.  See DEVBOX_CUSTOMIZATION_FINDINGS_2026-02-16.md.
+  - name: choco
     parameters:
-      package: Python.Python.3.12
+      package: python312
     timeout: 600
 
   # Configure Git global settings
@@ -41,13 +43,10 @@ tasks:
         git config --global init.defaultBranch main
     timeout: 60
 
-  # Install Python packages for Shraga
-  - name: powershell
-    parameters:
-      command: |
-        python -m pip install --upgrade pip
-        pip install requests azure-identity
-    timeout: 300
+  # NOTE: pip packages cannot be installed in system customization context.
+  # Python PATH is not available after choco install until a new user session
+  # starts.  Install pip packages after first RDP login instead.
+  # See DEVBOX_CUSTOMIZATION_FINDINGS_2026-02-16.md findings #3 and #4.
 
   # Configure OneDrive Silent Account Configuration
   - name: powershell
@@ -88,7 +87,7 @@ userTasks:
       command: |
         $repoPath = "C:\Dev\shraga-worker"
         if (!(Test-Path $repoPath)) {
-          git clone https://msazure.visualstudio.com/DefaultCollection/CCI/_git/Users --branch users/sagik/shraga-worker $repoPath
+          git clone https://github.com/SagiKat/shraga-worker.git $repoPath
           Write-Host "Shraga worker repository cloned to $repoPath"
         } else {
           Write-Host "Repository already exists at $repoPath"
