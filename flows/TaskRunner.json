@@ -346,9 +346,25 @@
             "and": [
               {
                 "not": {
-                  "equals": [
-                    "@outputs('Get_a_row_by_ID')?['body/cr_status']",
-                    "Pending"
+                  "or": [
+                    {
+                      "equals": [
+                        "@outputs('Get_a_row_by_ID')?['body/cr_status']",
+                        "Pending"
+                      ]
+                    },
+                    {
+                      "equals": [
+                        "@outputs('Get_a_row_by_ID')?['body/cr_status']",
+                        "Running"
+                      ]
+                    },
+                    {
+                      "equals": [
+                        "@outputs('Get_a_row_by_ID')?['body/cr_status']",
+                        "Queued"
+                      ]
+                    }
                   ]
                 }
               }
