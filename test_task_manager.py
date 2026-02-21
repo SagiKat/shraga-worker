@@ -769,7 +769,7 @@ class TestSweepStaleTasks:
         assert mock_patch.call_count == 0
 
         url = mock_get.call_args[0][0]
-        assert "cr_status eq 'Running'" in url
+        assert "cr_status eq 5" in url
         assert "modifiedon lt" in url
 
     @patch("task_manager.requests.patch")
@@ -1268,7 +1268,7 @@ class TestMonitorTaskPostRefactor:
             elif "cr_direction eq 'Inbound'" in url and "cr_status eq 'Unclaimed'" in url:
                 # poll_unclaimed query -- no new messages
                 return FakeResponse(json_data={"value": []})
-            elif "cr_status eq 'Running'" in url and "modifiedon lt" in url:
+            elif "cr_status eq 5" in url and "modifiedon lt" in url:
                 # sweep_stale_tasks query -- one stale task
                 return FakeResponse(json_data={"value": [stale_task]})
             else:
@@ -1294,7 +1294,7 @@ class TestMonitorTaskPostRefactor:
         )
 
         # Check that sweep_stale_tasks was called (running tasks with stale modifiedon)
-        sweep_calls = [u for u in get_urls if "cr_status eq 'Running'" in u and "modifiedon lt" in u]
+        sweep_calls = [u for u in get_urls if "cr_status eq 5" in u and "modifiedon lt" in u]
         assert len(sweep_calls) >= 1, (
             "sweep_stale_tasks should be called at least once per loop iteration"
         )
