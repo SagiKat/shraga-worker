@@ -189,7 +189,12 @@ class TaskManager:
         except json.JSONDecodeError: return raw, ""
         if data.get("is_error"):
             print(f"[WARN] Claude error: {data.get('result','')[:200]}"); return None, ""
-        return data.get("result", ""), data.get("session_id", "")
+        result = data.get("result", "")
+        # Guard: if Claude output raw JSON tool_calls, it's a malformed response - retry without session
+        if result and result.strip().startswith('{"tool_calls"'):
+            print(f"[WARN] Claude returned raw tool_calls JSON instead of natural language - discarding")
+            return None, data.get("session_id", "")
+        return result, data.get("session_id", "")
 
     def process_message(self, msg: dict):
         rid = msg.get("cr_shraga_conversationid")
