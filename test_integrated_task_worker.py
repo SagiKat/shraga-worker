@@ -237,7 +237,7 @@ class TestUpdateTask:
         # Verify PATCH was called with correct data
         call_kwargs = mock_patch.call_args
         sent_data = call_kwargs[1]["json"]
-        assert sent_data["cr_status"] == 5
+        assert sent_data["cr_status"] == "Running"
         assert sent_data["cr_statusmessage"] == "Running"
 
     @patch("integrated_task_worker.requests.patch")
@@ -678,7 +678,7 @@ class TestUpdateTaskSessionSummary:
         assert result is True
         sent_data = mock_patch.call_args[1]["json"]
         assert sent_data["crb3b_sessionsummary"] == '{"test": true}'
-        assert sent_data["cr_status"] == 7
+        assert sent_data["cr_status"] == "Completed"
 
     @patch("integrated_task_worker.requests.patch")
     def test_update_task_omits_session_summary_when_none(self, mock_patch, monkeypatch, tmp_path):
@@ -707,7 +707,7 @@ class TestUpdateTaskSessionSummary:
         # Second call should not have crb3b_sessionsummary
         retry_data = mock_patch.call_args_list[1][1]["json"]
         assert "crb3b_sessionsummary" not in retry_data
-        assert retry_data["cr_status"] == 7
+        assert retry_data["cr_status"] == "Completed"
 
 
 # ===========================================================================
@@ -1530,7 +1530,7 @@ class TestIsDevboxBusy:
         worker.is_devbox_busy()
         call_kwargs = mock_get.call_args
         filter_param = call_kwargs[1]["params"]["$filter"]
-        assert f"cr_status eq '{mod.STATUS_RUNNING}'" in filter_param
+        assert f"cr_status eq {mod._STATUS_INT[mod.STATUS_RUNNING]}" in filter_param
         assert "crb3b_devbox eq" in filter_param
 
     @patch("integrated_task_worker.requests.get")
@@ -1637,7 +1637,7 @@ class TestPromoteQueuedTasks:
         worker.promote_queued_tasks()
         call_kwargs = mock_get.call_args
         filter_param = call_kwargs[1]["params"]["$filter"]
-        assert f"cr_status eq '{mod.STATUS_QUEUED}'" in filter_param
+        assert f"cr_status eq {mod._STATUS_INT[mod.STATUS_QUEUED]}" in filter_param
         assert "crb3b_devbox eq" in filter_param
 
     @patch("integrated_task_worker.requests.get")

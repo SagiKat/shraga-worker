@@ -575,7 +575,7 @@ class IntegratedTaskWorker:
 
         data = {}
         if status is not None:
-            data["cr_status"] = _STATUS_INT.get(status, status) if isinstance(status, str) else status
+            data["cr_status"] = status
         if status_message is not None:
             data["cr_statusmessage"] = status_message
         if result is not None:
