@@ -207,7 +207,7 @@ class GlobalManager:
         self._known_users: set[str] = set()
         self.session_manager = SessionManager(sessions_file=sessions_file)
         # Load system prompt from CLAUDE.md at startup
-        claude_md = Path(__file__).parent / "SYSTEM_PROMPT.md"
+        claude_md = Path(__file__).parent / "GM_SYSTEM_PROMPT.md"
         self._system_prompt = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
         if self._system_prompt:
             print(f"[CONFIG] Loaded system prompt from {claude_md} ({len(self._system_prompt)} chars)")

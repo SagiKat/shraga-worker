@@ -36,7 +36,7 @@ class TaskManager:
         self._sessions_path = self._resolve_sessions_path()
         self._sessions: dict[str, str] = self._load_sessions()
         # Load system prompt from CLAUDE.md
-        claude_md = Path(__file__).parent / "SYSTEM_PROMPT.md"
+        claude_md = Path(__file__).parent / "PM_SYSTEM_PROMPT.md"
         self._system_prompt = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
 
     def _resolve_sessions_path(self) -> Path:
