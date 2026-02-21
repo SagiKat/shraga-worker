@@ -178,7 +178,8 @@ class TaskManager:
         if session_id: cmd.extend(["--resume", session_id])
         cmd.extend(["-p", user_text])
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-        cwd = self.working_dir if self.working_dir and os.path.isdir(self.working_dir) else None
+        # Run from task-manager/ dir so Claude reads the PM's CLAUDE.md
+        cwd = str(Path(__file__).parent)
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
                              env=env, cwd=cwd, encoding="utf-8", errors="replace")
         if res.returncode != 0:

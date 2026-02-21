@@ -400,9 +400,11 @@ class GlobalManager:
         cmd.extend(["-p", user_message])
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         try:
+            # Run from global-manager/ dir so Claude reads the GM's CLAUDE.md
+            gm_dir = str(Path(__file__).parent)
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=120, env=env,
-                encoding="utf-8", errors="replace",
+                cwd=gm_dir, encoding="utf-8", errors="replace",
             )
             if result.returncode != 0:
                 print(f"[WARN] Claude Code failed (rc={result.returncode}): {result.stderr[:300]}")
