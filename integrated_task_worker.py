@@ -34,7 +34,8 @@ UPDATE_BRANCH = os.environ.get("UPDATE_BRANCH", "origin/users/sagik/shraga-worke
 
 MACHINE_NAME = platform.node()  # This dev box's hostname
 
-# Status codes (string values matching Dataverse picklist)
+# Status labels (used in PATCH/POST bodies -- DV accepts string labels)
+# Status labels used in PATCH/POST bodies (Dataverse accepts string labels)
 STATUS_PENDING = "Pending"
 STATUS_QUEUED = "Queued"
 STATUS_RUNNING = "Running"
@@ -42,6 +43,10 @@ STATUS_WAITING_FOR_INPUT = "WaitingForInput"
 STATUS_COMPLETED = "Completed"
 STATUS_FAILED = "Failed"
 STATUS_CANCELED = "Canceled"
+
+# Integer picklist values for OData $filter expressions (DV requires integers in filters)
+_STATUS_INT = {"Pending": 1, "Queued": 3, "Running": 5, "WaitingForInput": 6,
+               "Completed": 7, "Failed": 8, "Canceled": 9}
 
 def format_session_numbers(stats: dict) -> str:
     """Format accumulated session stats into a one-line summary string.
@@ -367,7 +372,7 @@ class IntegratedTaskWorker:
         # Filter for pending tasks assigned to this dev box or unassigned
         # Support GUID, email in cr_userid, or email in crb3b_useremail
         filter_parts = [
-            f"cr_status eq '{STATUS_PENDING}'",
+            f"cr_status eq {_STATUS_INT[STATUS_PENDING]}",
             f"(cr_userid eq '{self.current_user_id}' or cr_userid eq '{WEBHOOK_USER}' or crb3b_useremail eq '{WEBHOOK_USER}')",
             f"(crb3b_devbox eq '{MACHINE_NAME}' or crb3b_devbox eq null)"
         ]
@@ -402,7 +407,7 @@ class IntegratedTaskWorker:
 
         url = f"{DATAVERSE_URL}/api/data/v9.2/{TABLE}"
         params = {
-            "$filter": f"crb3b_devbox eq '{MACHINE_NAME}' and cr_status eq '{STATUS_RUNNING}'",
+            "$filter": f"crb3b_devbox eq '{MACHINE_NAME}' and cr_status eq {_STATUS_INT[STATUS_RUNNING]}",
             "$top": 1,
             "$select": "cr_shraga_taskid"
         }
@@ -482,7 +487,7 @@ class IntegratedTaskWorker:
             resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
             if resp.status_code == 200:
                 status = resp.json().get("cr_status")
-                if status == STATUS_CANCELED:
+                if status == _STATUS_INT[STATUS_CANCELED] or status == STATUS_CANCELED:
                     print(f"[CANCEL] Task {task_id[:8]} has been canceled")
                     return True
             return False
@@ -530,7 +535,7 @@ class IntegratedTaskWorker:
 
         url = f"{DATAVERSE_URL}/api/data/v9.2/{TABLE}"
         params = {
-            "$filter": f"crb3b_devbox eq '{MACHINE_NAME}' and cr_status eq '{STATUS_QUEUED}'",
+            "$filter": f"crb3b_devbox eq '{MACHINE_NAME}' and cr_status eq {_STATUS_INT[STATUS_QUEUED]}",
             "$orderby": "createdon asc",
             "$top": 1,
             "$select": "cr_shraga_taskid"
@@ -570,7 +575,7 @@ class IntegratedTaskWorker:
 
         data = {}
         if status is not None:
-            data["cr_status"] = status
+            data["cr_status"] = _STATUS_INT.get(status, status) if isinstance(status, str) else status
         if status_message is not None:
             data["cr_statusmessage"] = status_message
         if result is not None:

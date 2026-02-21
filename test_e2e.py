@@ -962,7 +962,7 @@ class TestE2ECancelRunningTask:
                     ]
                     completed_updates = [
                         body for body in patch_bodies
-                        if body.get("cr_status") == "Completed"
+                        if body.get("cr_status") == 7
                     ]
                     assert len(completed_updates) >= 1, (
                         f"Expected STATUS_COMPLETED ('Completed') update, got: {patch_bodies}"

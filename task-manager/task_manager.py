@@ -18,7 +18,7 @@ REQ_TMO = 30
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "")
 DIR_IN, DIR_OUT = "Inbound", "Outbound"
 ST_UNCLAIMED, ST_CLAIMED, ST_PROCESSED, ST_EXPIRED = "Unclaimed", "Claimed", "Processed", "Expired"
-TASK_RUNNING, TASK_FAILED = "Running", "Failed"
+TASK_RUNNING, TASK_FAILED = 5, 8  # Integer picklist values for OData filters
 FALLBACK_MESSAGE = "The system is temporarily unavailable, please try again shortly."
 WORKING_DIR = os.environ.get("WORKING_DIR", "")
 SESSIONS_FILE = os.environ.get("SESSIONS_FILE", "")
@@ -166,7 +166,7 @@ class TaskManager:
     def sweep_stale_tasks(self, stale_minutes: int = 30) -> int:
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=stale_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
         return self._dv_batch_patch(TASKS_TBL,
-            f"crb3b_useremail eq '{self.user_email}' and cr_status eq '{TASK_RUNNING}'"
+            f"crb3b_useremail eq '{self.user_email}' and cr_status eq {TASK_RUNNING}"
             f" and modifiedon lt {cutoff}",
             {"cr_status": TASK_FAILED, "cr_result":
              "Task failed: no progress detected for 30+ minutes (likely worker crash or restart)"},
