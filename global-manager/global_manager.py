@@ -125,34 +125,34 @@ class SessionManager:
         except Exception as e:
             logger.warning("Failed to save sessions to %s: %s", self._sessions_file, e)
 
-    def get_or_create(self, conversation_id: str, user_email: str = "") -> str:
-        """Get an existing session ID or create a new one for a conversation.
-
-        Returns the session_id (a UUID string).
-        """
+    def get_session(self, conversation_id: str) -> dict | None:
+        """Get session entry by conversation ID, or None if not found."""
         entry = self._sessions.get(conversation_id)
-        now = datetime.now(timezone.utc).isoformat()
-
         if entry:
-            entry["last_used"] = now
+            entry["last_used"] = datetime.now(timezone.utc).isoformat()
             self._save()
-            return entry["session_id"]
+        return entry
 
-        # Create new session
-        session_id = uuid.uuid4().hex
+    def save_session(self, conversation_id: str, session_id: str, user_email: str = ""):
+        """Save a real session ID returned by Claude CLI."""
+        now = datetime.now(timezone.utc).isoformat()
+        is_new = conversation_id not in self._sessions
         self._sessions[conversation_id] = {
             "session_id": session_id,
-            "created_at": now,
+            "created_at": self._sessions.get(conversation_id, {}).get("created_at", now),
             "last_used": now,
             "user_email": user_email,
         }
         self._save()
-        logger.info("Created session %s for conversation %s", session_id[:8], conversation_id[:8])
-        return session_id
+        if is_new:
+            print(f"[SESSIONS] New session {session_id[:8]}... for {conversation_id[:20]}...")
 
-    def get_session(self, conversation_id: str) -> dict | None:
-        """Get session entry by conversation ID, or None if not found."""
-        return self._sessions.get(conversation_id)
+    def forget(self, conversation_id: str):
+        """Remove a session (e.g. after resume failure)."""
+        if conversation_id in self._sessions:
+            old = self._sessions.pop(conversation_id)
+            self._save()
+            print(f"[SESSIONS] Forgot session {old['session_id'][:8]}... for {conversation_id[:20]}...")
 
     def cleanup_expired(self, max_age_hours: int | None = None):
         """Remove sessions older than max_age_hours (default SESSION_EXPIRY_HOURS).
@@ -384,23 +384,20 @@ class GlobalManager:
 
     # ── Claude Code Session ──────────────────────────────────────────
 
-    def _call_claude_code(self, session_id: str, user_message: str) -> str | None:
-        """Call Claude Code with session resumption.
+    def _call_claude_code(self, user_message: str, session_id: str | None = None) -> tuple[str | None, str]:
+        """Call Claude Code, optionally resuming an existing session.
 
-        Runs: claude --resume {session_id} --print -p "{user_message}"
+        On first call (session_id=None): starts a fresh session.
+        On subsequent calls: resumes the session with --resume.
 
-        Claude Code reads CLAUDE.md automatically and can run scripts directly
-        (get_user_state.py, update_user_state.py, check_devbox_status.py, etc.).
+        Uses --output-format json to capture the session_id from the response.
 
-        Returns the response text or None on failure.
+        Returns (response_text, session_id) or (None, "") on failure.
         """
-        cmd = [
-            "claude",
-            "--resume", session_id,
-            "--print",
-            "--dangerously-skip-permissions",
-            "-p", user_message,
-        ]
+        cmd = ["claude", "--print", "--output-format", "json", "--dangerously-skip-permissions"]
+        if session_id:
+            cmd.extend(["--resume", session_id])
+        cmd.extend(["-p", user_message])
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         try:
             result = subprocess.run(
@@ -409,17 +406,33 @@ class GlobalManager:
             )
             if result.returncode != 0:
                 print(f"[WARN] Claude Code failed (rc={result.returncode}): {result.stderr[:300]}")
-                return None
-            return result.stdout.strip() or None
+                return None, ""
+            raw = result.stdout.strip()
+            if not raw:
+                return None, ""
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                return raw, ""
+            if data.get("is_error"):
+                print(f"[WARN] Claude error: {data.get('result', '')[:200]}")
+                return None, ""
+            resp = data.get("result", "")
+            new_sid = data.get("session_id", "")
+            # Guard: if Claude returned raw JSON tool_calls, discard
+            if resp and resp.strip().startswith('{"tool_calls"'):
+                print("[WARN] Claude returned raw tool_calls JSON - discarding")
+                return None, new_sid
+            return resp, new_sid
         except subprocess.TimeoutExpired:
             print("[WARN] Claude Code timed out")
-            return None
+            return None, ""
         except FileNotFoundError:
             print("[WARN] Claude Code CLI not found")
-            return None
+            return None, ""
         except Exception as e:
             print(f"[ERROR] _call_claude_code: {e}")
-            return None
+            return None, ""
 
     # ── Message Processing ───────────────────────────────────────────
 
@@ -440,8 +453,9 @@ class GlobalManager:
 
         print(f"[GLOBAL] Processing orphaned message from {user_email}: {user_text[:80]}...")
 
-        # Get or create a Claude Code session for this conversation
-        session_id = self.session_manager.get_or_create(mcs_conv_id, user_email=user_email)
+        # Look up existing session (None if first message in this conversation)
+        existing = self.session_manager.get_session(mcs_conv_id)
+        session_id = existing["session_id"] if existing else None
 
         # Build the prompt with context for Claude Code
         prompt = (
@@ -455,10 +469,20 @@ class GlobalManager:
         )
 
         # Let Claude Code handle everything
-        response = self._call_claude_code(session_id, prompt)
+        response, new_sid = self._call_claude_code(prompt, session_id=session_id)
+
+        # If resume failed, retry without session
+        if response is None and session_id:
+            print(f"[SESSIONS] Resume failed for {session_id[:8]}..., starting fresh")
+            self.session_manager.forget(mcs_conv_id)
+            response, new_sid = self._call_claude_code(prompt, session_id=None)
 
         if not response:
             response = FALLBACK_MESSAGE
+
+        # Save the real session ID returned by Claude
+        if new_sid and mcs_conv_id:
+            self.session_manager.save_session(mcs_conv_id, new_sid, user_email)
 
         print(f"[PROCESS] Finished processing {row_id[:8]}. Sending response ({len(response)} chars)...")
         self.send_response(

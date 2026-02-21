@@ -140,9 +140,9 @@ class TestClaudeCodeInvocation:
     def test_call_claude_code_uses_resume_flag(self, mock_run, manager):
         """Claude Code must be called with --resume {session_id}."""
         mock_run.return_value = MagicMock(
-            returncode=0, stdout="Hello! How can I help?", stderr=""
+            returncode=0, stdout=json.dumps({"result": "Hello! How can I help?", "session_id": "abc123session"}), stderr=""
         )
-        result = manager._call_claude_code("abc123session", "Hello")
+        result, sid = manager._call_claude_code("Hello", session_id="abc123session")
 
         assert result == "Hello! How can I help?"
         cmd = mock_run.call_args[0][0]
@@ -155,9 +155,9 @@ class TestClaudeCodeInvocation:
     def test_call_claude_code_passes_message(self, mock_run, manager):
         """The user message is passed via -p flag."""
         mock_run.return_value = MagicMock(
-            returncode=0, stdout="Response text", stderr=""
+            returncode=0, stdout=json.dumps({"result": 'Response text', "session_id": "sess-1"}), stderr=""
         )
-        manager._call_claude_code("session-1", "What is Shraga?")
+        manager._call_claude_code("What is Shraga?")
 
         cmd = mock_run.call_args[0][0]
         # -p flag should be followed by the message
@@ -168,9 +168,9 @@ class TestClaudeCodeInvocation:
     def test_call_claude_code_strips_claudecode_env(self, mock_run, manager):
         """CLAUDECODE env var must be stripped to avoid nested session errors."""
         mock_run.return_value = MagicMock(
-            returncode=0, stdout="ok", stderr=""
+            returncode=0, stdout=json.dumps({"result": 'ok', "session_id": "sess-1"}), stderr=""
         )
-        manager._call_claude_code("session-1", "test")
+        manager._call_claude_code("test")
 
         call_kwargs = mock_run.call_args[1]
         env = call_kwargs.get("env", {})
@@ -180,9 +180,9 @@ class TestClaudeCodeInvocation:
     def test_call_claude_code_uses_dangerously_skip_permissions(self, mock_run, manager):
         """Must include --dangerously-skip-permissions flag."""
         mock_run.return_value = MagicMock(
-            returncode=0, stdout="ok", stderr=""
+            returncode=0, stdout=json.dumps({"result": 'ok', "session_id": "sess-1"}), stderr=""
         )
-        manager._call_claude_code("session-1", "test")
+        manager._call_claude_code("test")
 
         cmd = mock_run.call_args[0][0]
         assert "--dangerously-skip-permissions" in cmd
@@ -193,7 +193,7 @@ class TestClaudeCodeInvocation:
         mock_run.return_value = MagicMock(
             returncode=1, stdout="", stderr="Error: something broke"
         )
-        result = manager._call_claude_code("session-1", "test")
+        result, sid = manager._call_claude_code("test")
         assert result is None
 
     @patch("global_manager.subprocess.run")
@@ -201,14 +201,14 @@ class TestClaudeCodeInvocation:
         """Returns None on subprocess timeout."""
         import subprocess
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=120)
-        result = manager._call_claude_code("session-1", "test")
+        result, sid = manager._call_claude_code("test")
         assert result is None
 
     @patch("global_manager.subprocess.run")
     def test_call_claude_code_handles_not_found(self, mock_run, manager):
         """Returns None when claude CLI is not found."""
         mock_run.side_effect = FileNotFoundError("claude not found")
-        result = manager._call_claude_code("session-1", "test")
+        result, sid = manager._call_claude_code("test")
         assert result is None
 
     @patch("global_manager.subprocess.run")
@@ -217,16 +217,16 @@ class TestClaudeCodeInvocation:
         mock_run.return_value = MagicMock(
             returncode=0, stdout="", stderr=""
         )
-        result = manager._call_claude_code("session-1", "test")
+        result, sid = manager._call_claude_code("test")
         assert result is None
 
     @patch("global_manager.subprocess.run")
     def test_call_claude_code_encoding_params(self, mock_run, manager):
         """Must use encoding='utf-8' and errors='replace' for Unicode safety."""
         mock_run.return_value = MagicMock(
-            returncode=0, stdout="ok", stderr=""
+            returncode=0, stdout=json.dumps({"result": 'ok', "session_id": "sess-1"}), stderr=""
         )
-        manager._call_claude_code("session-1", "test")
+        manager._call_claude_code("test")
 
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs.get("encoding") == "utf-8"
@@ -238,10 +238,10 @@ class TestClaudeCodeInvocation:
         """Claude may return emojis/non-ASCII; must not crash."""
         non_ascii = "Hello! \U0001f44d Great job \u2014 devbox ready \u2705"
         mock_run.return_value = MagicMock(
-            returncode=0, stdout=non_ascii, stderr=""
+            returncode=0, stdout=json.dumps({"result": non_ascii, "session_id": "sess-1"}), stderr=""
         )
-        result = manager._call_claude_code("session-1", "test")
-        assert result == non_ascii.strip()
+        result, sid = manager._call_claude_code("test")
+        assert result == non_ascii
 
 
 # ============================================================================
@@ -253,12 +253,12 @@ class TestSessionPersistence:
 
     def test_sessions_file_created_on_save(self, session_mgr, sessions_file):
         """Sessions file is created when a session is saved."""
-        session_mgr.get_or_create("conv-1", "user@test.com")
+        session_mgr.save_session("conv-1", "real-session-id-1", "user@test.com")
         assert sessions_file.exists()
 
     def test_sessions_file_contains_valid_json(self, session_mgr, sessions_file):
         """Sessions file contains valid JSON."""
-        session_mgr.get_or_create("conv-1", "user@test.com")
+        session_mgr.save_session("conv-1", "real-session-id-1", "user@test.com")
         data = json.loads(sessions_file.read_text(encoding="utf-8"))
         assert isinstance(data, dict)
         assert "conv-1" in data
@@ -267,7 +267,7 @@ class TestSessionPersistence:
         """Sessions survive SessionManager restart (loaded from disk)."""
         from global_manager import SessionManager
         mgr1 = SessionManager(sessions_file=sessions_file)
-        sid = mgr1.get_or_create("conv-persist", "user@test.com")
+        mgr1.save_session("conv-persist", "real-session-id-persist", "user@test.com")
 
         # Create a new SessionManager instance (simulates restart)
         mgr2 = SessionManager(sessions_file=sessions_file)
