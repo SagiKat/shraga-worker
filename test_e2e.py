@@ -744,7 +744,7 @@ class TestE2ECancelRunningTask:
                     ]
                     failed_updates = [
                         body for body in patch_bodies
-                        if body.get("cr_status") == 8
+                        if body.get("cr_status") == "Failed"
                     ]
                     assert len(failed_updates) >= 1, (
                         f"Expected at least one PATCH setting status to 'Failed', "
