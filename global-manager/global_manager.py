@@ -34,6 +34,8 @@ from datetime import datetime, timezone, timedelta
 from azure.identity import DefaultAzureCredential
 from azure.core.credentials import AccessToken
 
+os.environ.setdefault('PYTHONUNBUFFERED', '1')
+
 # Unique instance ID for this process (helps distinguish multiple GM instances)
 INSTANCE_ID = uuid.uuid4().hex[:8]
 

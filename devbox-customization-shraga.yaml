@@ -2,6 +2,9 @@ $schema: "1.0"
 name: "shraga-dev-environment"
 description: "Dev Box for Shraga autonomous task execution - Dataverse communication + Git results"
 
+env:
+  PYTHONUNBUFFERED: "1"
+
 tasks:
   # Install Git (required for Claude Code)
   - name: winget

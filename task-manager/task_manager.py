@@ -5,6 +5,8 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from azure.identity import DefaultAzureCredential
 
+os.environ.setdefault('PYTHONUNBUFFERED', '1')
+
 INSTANCE_ID = uuid.uuid4().hex[:8]
 DV_URL = os.environ.get("DATAVERSE_URL", "https://org3e79cdb1.crm3.dynamics.com")
 DV_API = f"{DV_URL}/api/data/v9.2"

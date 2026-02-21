@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from autonomous_agent import AgentCLI, extract_phase_stats, merge_phase_stats
 
 import os
+os.environ.setdefault('PYTHONUNBUFFERED', '1')
 from onedrive_utils import find_onedrive_root, local_path_to_web_url, OneDriveRootNotFoundError
 
 DATAVERSE_URL = os.environ.get("DATAVERSE_URL", "https://org3e79cdb1.crm3.dynamics.com")

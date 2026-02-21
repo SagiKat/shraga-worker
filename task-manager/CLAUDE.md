@@ -50,7 +50,7 @@ The ONLY hardcoded user-facing message is the single fallback for when Claude CL
 
 ### Background Task Monitoring
 
-When a task is created, the PM spawns a background thread (`_monitor_task_start`) that polls the task row for the Running card message ID. Once the card is ready, it composes a natural follow-up message with the deep link to the live progress card and sends it proactively as an outbound message.
+When a task is created, the Power Automate TaskRunner flow handles follow-up messaging. The flow sends the running card with a deep link to the live progress card directly in Teams. The PM does not use a background thread for this -- all follow-up messaging is handled by the flow infrastructure.
 
 ## Session Continuity
 
@@ -82,8 +82,8 @@ The PM runs stale task detection (`sweep_stale_tasks`) on **every polling cycle*
 
 ### Behavior
 
-1. Queries Dataverse for tasks with `cr_status == 5` (Running) and `modifiedon` older than 30 minutes, filtered to the current user's email (`crb3b_useremail`).
-2. Each stale task is PATCHed to Failed (status 8) with the result message: `"Task failed: no progress detected for 30+ minutes (likely worker crash or restart)"`.
+1. Queries Dataverse for tasks with `cr_status == 'Running'` and `modifiedon` older than 30 minutes, filtered to the current user's email (`crb3b_useremail`).
+2. Each stale task is PATCHed to `'Failed'` with the result message: `"Task failed: no progress detected for 30+ minutes (likely worker crash or restart)"`.
 3. Returns the count of tasks marked as failed.
 4. Handles query errors and patch errors gracefully without crashing.
 
@@ -120,10 +120,10 @@ The PM also cleans up stale unclaimed outbound rows to prevent interference with
 
 ### Task Row Operations
 
-- **create_task(prompt, description)** -- Creates a row in `cr_shraga_tasks` with status `Pending` (1), sets `crb3b_useremail`, `crb3b_devbox`, and `crb3b_workingdir`.
+- **create_task(prompt, description)** -- Creates a row in `cr_shraga_tasks` with status `'Pending'`, sets `crb3b_useremail`, `crb3b_devbox`, and `crb3b_workingdir`.
 - **list_tasks(top)** -- Lists recent tasks ordered by `createdon desc`.
 - **get_task(task_id)** -- Fetches a single task by its primary key.
-- **cancel_task(task_id)** -- Sets `cr_status` to `Canceled` (9).
+- **cancel_task(task_id)** -- Sets `cr_status` to `'Canceled'`.
 - **get_task_messages(task_id, top)** -- Fetches recent messages for a task from `cr_shragamessages`.
 
 ## Available Scripts

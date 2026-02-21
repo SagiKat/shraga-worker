@@ -16,7 +16,7 @@ Poll -> Parse -> Claim -> Execute (Worker/Verifier Loop) -> Summarize -> Complet
 
 ### 1. Poll for Tasks
 
-`IntegratedTaskWorker.poll_pending_tasks()` queries Dataverse for tasks with `cr_status == 1` (Pending) assigned to this dev box or user. Polling interval is 10 seconds.
+`IntegratedTaskWorker.poll_pending_tasks()` queries Dataverse for tasks with `cr_status == 'Pending'` assigned to this dev box or user. Polling interval is 10 seconds.
 
 ### 2. Parse Prompt
 
@@ -24,7 +24,7 @@ Poll -> Parse -> Claim -> Execute (Worker/Verifier Loop) -> Summarize -> Complet
 
 ### 3. Claim Task (Atomic)
 
-`IntegratedTaskWorker.claim_task()` uses ETag-based optimistic concurrency (`If-Match` header) to atomically set the task from Pending to Running. If another worker claimed it first, HTTP 412 is returned and the task is skipped. If the dev box is already busy with another task, the new task is set to Queued status (`cr_status == 3`) via `queue_task()`.
+`IntegratedTaskWorker.claim_task()` uses ETag-based optimistic concurrency (`If-Match` header) to atomically set the task from Pending to Running. If another worker claimed it first, HTTP 412 is returned and the task is skipped. If the dev box is already busy with another task, the new task is set to Queued status (`cr_status == 'Queued'`) via `queue_task()`.
 
 ### 4. Create Session Folder
 
@@ -115,7 +115,7 @@ Cancellation is **cooperative** -- the system checks for cancellation at defined
 
 ### How It Works
 
-`IntegratedTaskWorker.is_task_canceled()` queries Dataverse for the task's current status. If `cr_status == 9` (Canceled), it returns `True`.
+`IntegratedTaskWorker.is_task_canceled()` queries Dataverse for the task's current status. If `cr_status == 'Canceled'`, it returns `True`.
 
 ### Cancellation Checkpoints
 
@@ -219,15 +219,15 @@ Each task gets an isolated session folder in OneDrive:
 
 ## Dataverse Status Codes
 
-| Code | Constant | Meaning |
-|------|----------|---------|
-| 1 | `STATUS_PENDING` | Task waiting to be picked up |
-| 3 | `STATUS_QUEUED` | Task queued (dev box busy) |
-| 5 | `STATUS_RUNNING` | Task actively executing |
-| 6 | `STATUS_WAITING_FOR_INPUT` | Worker blocked, needs user input |
-| 7 | `STATUS_COMPLETED` | Task completed and verified |
-| 8 | `STATUS_FAILED` | Task failed |
-| 9 | `STATUS_CANCELED` | Task canceled by user |
+| Value | Constant | Meaning |
+|-------|----------|---------|
+| `"Pending"` | `STATUS_PENDING` | Task waiting to be picked up |
+| `"Queued"` | `STATUS_QUEUED` | Task queued (dev box busy) |
+| `"Running"` | `STATUS_RUNNING` | Task actively executing |
+| `"WaitingForInput"` | `STATUS_WAITING_FOR_INPUT` | Worker blocked, needs user input |
+| `"Completed"` | `STATUS_COMPLETED` | Task completed and verified |
+| `"Failed"` | `STATUS_FAILED` | Task failed |
+| `"Canceled"` | `STATUS_CANCELED` | Task canceled by user |
 
 ## Environment Variables
 
