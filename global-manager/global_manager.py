@@ -206,6 +206,13 @@ class GlobalManager:
         self._token_expires = None
         self._known_users: set[str] = set()
         self.session_manager = SessionManager(sessions_file=sessions_file)
+        # Load system prompt from CLAUDE.md at startup
+        claude_md = Path(__file__).parent / "SYSTEM_PROMPT.md"
+        self._system_prompt = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
+        if self._system_prompt:
+            print(f"[CONFIG] Loaded system prompt from {claude_md} ({len(self._system_prompt)} chars)")
+        else:
+            print(f"[WARN] No CLAUDE.md found at {claude_md}")
 
     # ── Auth ──────────────────────────────────────────────────────────
 
@@ -395,16 +402,16 @@ class GlobalManager:
         Returns (response_text, session_id) or (None, "") on failure.
         """
         cmd = ["claude", "--print", "--output-format", "json", "--dangerously-skip-permissions"]
+        if self._system_prompt:
+            cmd.extend(["--system-prompt", self._system_prompt])
         if session_id:
             cmd.extend(["--resume", session_id])
         cmd.extend(["-p", user_message])
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         try:
-            # Run from global-manager/ dir so Claude reads the GM's CLAUDE.md
-            gm_dir = str(Path(__file__).parent)
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=120, env=env,
-                cwd=gm_dir, encoding="utf-8", errors="replace",
+                encoding="utf-8", errors="replace",
             )
             if result.returncode != 0:
                 print(f"[WARN] Claude Code failed (rc={result.returncode}): {result.stderr[:300]}")

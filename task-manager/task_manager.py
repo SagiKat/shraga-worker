@@ -35,6 +35,9 @@ class TaskManager:
         self._token_cache = self._token_expires = None
         self._sessions_path = self._resolve_sessions_path()
         self._sessions: dict[str, str] = self._load_sessions()
+        # Load system prompt from CLAUDE.md
+        claude_md = Path(__file__).parent / "SYSTEM_PROMPT.md"
+        self._system_prompt = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
 
     def _resolve_sessions_path(self) -> Path:
         if SESSIONS_FILE: return Path(SESSIONS_FILE)
@@ -174,12 +177,12 @@ class TaskManager:
 
     def _call_claude(self, user_text: str, session_id: str | None = None) -> tuple[str | None, str]:
         cmd = ["claude", "--print", "--output-format", "json", "--dangerously-skip-permissions"]
+        if self._system_prompt: cmd.extend(["--system-prompt", self._system_prompt])
         if CHAT_MODEL: cmd.extend(["--model", CHAT_MODEL])
         if session_id: cmd.extend(["--resume", session_id])
         cmd.extend(["-p", user_text])
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-        # Run from task-manager/ dir so Claude reads the PM's CLAUDE.md
-        cwd = str(Path(__file__).parent)
+        cwd = self.working_dir if self.working_dir and os.path.isdir(self.working_dir) else None
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
                              env=env, cwd=cwd, encoding="utf-8", errors="replace")
         if res.returncode != 0:
