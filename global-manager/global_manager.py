@@ -362,7 +362,7 @@ class GlobalManager:
             return None
         try:
             body = {
-                "cr_name": text[:200],
+                "cr_name": text[:100],
                 "cr_useremail": user_email,
                 "cr_mcs_conversation_id": mcs_conversation_id,
                 "cr_message": text,

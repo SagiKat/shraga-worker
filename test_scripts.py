@@ -748,7 +748,7 @@ class TestSendMessageCli:
         )
 
         body = mock_post.call_args[1]["json"]
-        assert len(body["cr_name"]) == 200
+        assert len(body["cr_name"]) == 100
         assert body["cr_message"] == "A" * 500
 
     @patch("send_message.requests.post")

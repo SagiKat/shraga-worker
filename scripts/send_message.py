@@ -93,7 +93,7 @@ def send_message(
         or None on failure.
     """
     body = {
-        "cr_name": message[:200],
+        "cr_name": message[:100],
         "cr_useremail": user_email,
         "cr_mcs_conversation_id": mcs_conversation_id,
         "cr_message": message,

@@ -534,12 +534,12 @@ class TestResponse:
 
     @patch("global_manager.requests.post")
     def test_send_response_truncates_name(self, mock_post, manager):
-        """cr_name field should be truncated to 200 chars."""
+        """cr_name field should be truncated to 100 chars (DV column limit)."""
         mock_post.return_value = FakeResponse(json_data={})
         long_text = "A" * 500
         manager.send_response("row-1", "mcs-1", "user@test.com", long_text)
         body = mock_post.call_args[1]["json"]
-        assert len(body["cr_name"]) == 200
+        assert len(body["cr_name"]) == 100
         assert body["cr_message"] == long_text  # Full message preserved
 
 
